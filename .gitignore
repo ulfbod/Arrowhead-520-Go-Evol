@@ -1,0 +1,39 @@
+# ── Secrets and config ────────────────────────────────────────────────────────
+.env
+*.pem
+*.key
+secrets/
+/certs/
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+*.exe
+*.test
+*.out
+/bin/
+vendor/
+
+# ── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# docker-compose.override.yml is intentionally NOT ignored
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/settings.json
+*.swp
+.DS_Store
+
+# ── Test artifacts ────────────────────────────────────────────────────────────
+*.log
+test-results/
+coverage/
+
+# ── Database ──────────────────────────────────────────────────────────────────
+*.db
+
+# ── Local development support ─────────────────────────────────────────────────
+dev-support/

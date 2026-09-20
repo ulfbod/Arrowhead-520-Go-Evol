@@ -1,0 +1,19 @@
+go 1.25.0
+
+use (
+	./core
+	./foundation
+	./services/cert-provisioner
+	./services/kafka-authz
+	./services/pap
+	./services/pki-rest-authz
+	./services/profile-ca
+	./services/topic-auth-xacml
+	./shared/authzforce
+	./shared/authzforce-server
+	./shared/kafka-authz
+	./shared/policy-sync
+	./shared/rest-authz
+	./shared/topic-auth-xacml
+	./tests/integration
+)

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    name: Go — build / vet / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: Build, vet, and test all modules
+        run: |
+          set -e
+          MODULES="core foundation services/profile-ca services/pap services/cert-provisioner \
+                   services/kafka-authz services/topic-auth-xacml services/pki-rest-authz \
+                   shared/authzforce shared/authzforce-server shared/kafka-authz \
+                   shared/rest-authz shared/topic-auth-xacml shared/policy-sync"
+          for mod in $MODULES; do
+            if [ -f "$mod/go.mod" ]; then
+              echo "::group::$mod"
+              cd "$mod"
+              go build ./...
+              go vet ./...
+              go test -count=1 ./...
+              cd "$GITHUB_WORKSPACE"
+              echo "::endgroup::"
+            fi
+          done
+
+  docker-build:
+    name: Docker — verify compose build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - run: docker compose -f deploy/docker-compose.yml build

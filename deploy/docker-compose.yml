@@ -1,0 +1,450 @@
+# Arrowhead 5.2.0 — Full deployment stack
+#
+# Architecture:
+#   CA-as-PIP (D4): profile-ca serves PIP endpoints directly from its cert store.
+#   D2': cert-valid pre-gate at connection time.
+#   D3: Hard mTLS requirement at broker level.
+#
+# Ports exposed to host:
+#   profile-ca HTTP (+ PIP):      http://localhost:8787
+#   profile-ca mTLS:              https://localhost:8788
+#   profile-ca gRPC:              localhost:8789
+#   AuthzForce:                   http://localhost:8896/authzforce-ce
+#   ServiceRegistry TLS:          https://localhost:8490
+#   Authentication TLS:           https://localhost:8491
+#   ConsumerAuthorization TLS:    https://localhost:8492
+#   DynamicOrch-XACML HTTP:       http://localhost:8083
+#   authz-pdp gRPC:               localhost:9550
+#   PAP:                          http://localhost:9505
+#   kafka-authz:                  http://localhost:9101
+#   pki-rest-authz mTLS:          https://localhost:9208
+#   pki-rest-authz HTTP:          http://localhost:9209
+#   RabbitMQ management:          http://localhost:15672
+#   Kafdrop (Kafka UI):           http://localhost:9000
+#   Dashboard (monitoring):       http://localhost:3000
+
+services:
+
+  # -- profile-ca -- Arrowhead 5.2 Local Cloud CA + PIP endpoints (CA-as-PIP) --
+
+  profile-ca:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/profile-ca.Dockerfile
+    environment:
+      PORT: "8787"
+      TLS_PORT: "8788"
+      GRPC_PORT: "8789"
+      CA_KEY_FILE: "/data/ca.key"
+    volumes:
+      - profile-ca-data:/data
+    ports:
+      - "8787:8787"
+      - "8788:8788"
+      - "8789:8789"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8787/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- cert-provisioner --------------------------------------------------------
+
+  cert-provisioner:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/cert-provisioner.Dockerfile
+    environment:
+      CA_URL: "http://profile-ca:8787"
+      CERTS_DIR: "/certs"
+    volumes:
+      - certs:/certs
+    depends_on:
+      profile-ca:
+        condition: service_healthy
+    restart: "no"
+
+  # -- Infrastructure ----------------------------------------------------------
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+    volumes:
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - certs:/certs:ro
+    depends_on:
+      cert-provisioner:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  authzforce:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/authzforce-server.Dockerfile
+    ports:
+      - "8896:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/kafka-tls.Dockerfile
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: SSL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: SSL://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: SSL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SSL:SSL,CONTROLLER:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "NkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_SSL_CLIENT_AUTH: required
+      KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+      CERT_DIR: /certs
+      KAFKA_KEYSTORE_PASS: kafkapass123
+      # CA-as-PIP (D4): plugin queries profile-ca directly
+      ARROWHEAD_PIP_URL: "http://profile-ca:8787"
+    volumes:
+      - certs:/certs:ro
+    depends_on:
+      cert-provisioner:
+        condition: service_completed_successfully
+      profile-ca:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # -- Arrowhead Core Systems (foundation) -------------------------------------
+
+  serviceregistry:
+    build:
+      context: ../foundation
+      dockerfile: ../deploy/dockerfiles/foundation.Dockerfile
+      args:
+        CMD: serviceregistry
+    environment:
+      PORT: "8080"
+      TLS_PORT: "8490"
+      TLS_CERT_FILE: "/certs/serviceregistry.crt"
+      TLS_KEY_FILE:  "/certs/serviceregistry.key"
+      TLS_CA_FILE:   "/certs/ca.crt"
+      DB_PATH: "/data/serviceregistry.db"
+    ports:
+      - "8490:8490"
+    volumes:
+      - certs:/certs:ro
+      - serviceregistry-data:/data
+    depends_on:
+      cert-provisioner:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  authentication:
+    build:
+      context: ../foundation
+      dockerfile: ../deploy/dockerfiles/foundation.Dockerfile
+      args:
+        CMD: authentication
+    environment:
+      PORT: "8081"
+      TLS_PORT: "8491"
+      TLS_CERT_FILE: "/certs/authentication.crt"
+      TLS_KEY_FILE:  "/certs/authentication.key"
+      TLS_CA_FILE:   "/certs/ca.crt"
+      DB_PATH: "/data/authentication.db"
+    ports:
+      - "8491:8491"
+    volumes:
+      - certs:/certs:ro
+      - authentication-data:/data
+    depends_on:
+      cert-provisioner:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  consumerauth:
+    build:
+      context: ../foundation
+      dockerfile: ../deploy/dockerfiles/foundation.Dockerfile
+      args:
+        CMD: consumerauth
+    environment:
+      PORT: "8082"
+      TLS_PORT: "8492"
+      TLS_CERT_FILE: "/certs/consumerauth.crt"
+      TLS_KEY_FILE:  "/certs/consumerauth.key"
+      TLS_CA_FILE:   "/certs/ca.crt"
+      DB_PATH: "/data/consumerauth.db"
+    ports:
+      - "8492:8492"
+    volumes:
+      - certs:/certs:ro
+      - consumerauth-data:/data
+    depends_on:
+      cert-provisioner:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- authz-pdp -- AuthorizationPDP gRPC service ------------------------------
+
+  authz-pdp:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/authz-pdp.Dockerfile
+    environment:
+      AUTHZFORCE_URL: "http://authzforce:8080/authzforce-ce"
+      AUTHZFORCE_DOMAIN: "arrowhead-520"
+      PORT: "9550"
+    ports:
+      - "9550:9550"
+    depends_on:
+      authzforce:
+        condition: service_healthy
+      pap:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9550 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- DynamicOrchestration-XACML ----------------------------------------------
+
+  dynamicorch-xacml:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/dynamicorch-xacml.Dockerfile
+    environment:
+      SR_URL: "http://serviceregistry:8080"
+      AUTH_BACKEND: "grpc"
+      AUTHZ_PDP_ADDR: "authz-pdp:9550"
+      CA_URL: "http://consumerauth:8082"
+      ENABLE_AUTH: "true"
+      PORT: "8083"
+    ports:
+      - "8083:8083"
+    depends_on:
+      authz-pdp:
+        condition: service_healthy
+      serviceregistry:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/status || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- PAP -- Policy Administration Point --------------------------------------
+
+  pap:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/pap.Dockerfile
+    environment:
+      AUTHZFORCE_URL: "http://authzforce:8080/authzforce-ce"
+      AUTHZFORCE_DOMAIN: "arrowhead-520"
+      PORT: "9505"
+    ports:
+      - "9505:9505"
+    depends_on:
+      authzforce:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9505/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # NOTE: No separate pip service -- CA-as-PIP (D4):
+  # profile-ca serves /pip/attributes/{cn}, /pip/subjects, /pip/status directly.
+
+  # Seeds XACML policies. PIP is served directly by profile-ca (CA-as-PIP).
+
+  setup:
+    image: curlimages/curl:8.7.1
+    depends_on:
+      pap:
+        condition: service_healthy
+      profile-ca:
+        condition: service_healthy
+      authentication:
+        condition: service_healthy
+    volumes:
+      - ./setup/seed-policies.sh:/seed-policies.sh:ro
+    restart: "no"
+    entrypoint: ["sh", "/seed-policies.sh"]
+
+  # -- AMQP Enforcement -------------------------------------------------------
+  # topic-auth-xacml pre-gates on certValid from profile-ca PIP (CA-as-PIP).
+
+  topic-auth-xacml:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/topic-auth-xacml.Dockerfile
+    environment:
+      AUTHZFORCE_URL: "http://authzforce:8080/authzforce-ce"
+      AUTHZFORCE_DOMAIN: "arrowhead-520"
+      RABBITMQ_ADMIN_USER: admin
+      RABBITMQ_ADMIN_PASS: admin
+      CONSUMER_PASSWORD: "consumer-secret"
+      PUBLISHER_USER: "RobotFleet"
+      PUBLISHER_PASSWORD: "fleet-secret"
+      CACHE_TTL: "0s"
+      PORT: "9090"
+      # CA-as-PIP (D4): point to profile-ca instead of separate pip service
+      PIP_URL: "http://profile-ca:8787"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      pap:
+        condition: service_healthy
+      profile-ca:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- Kafka Enforcement -------------------------------------------------------
+
+  kafka-authz:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/kafka-authz.Dockerfile
+    environment:
+      KAFKA_BROKERS: "kafka:9092"
+      AUTHZFORCE_URL: "http://authzforce:8080/authzforce-ce"
+      AUTHZFORCE_DOMAIN: "arrowhead-520"
+      PORT: "9101"
+      CA_URL: "http://profile-ca:8787"
+      # CA-as-PIP (D4): point to profile-ca instead of separate pip service
+      PIP_URL: "http://profile-ca:8787"
+    ports:
+      - "9101:9101"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      pap:
+        condition: service_healthy
+      profile-ca:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9101/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- REST mTLS Enforcement ---------------------------------------------------
+
+  pki-rest-authz:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/pki-rest-authz.Dockerfile
+    environment:
+      AUTHZFORCE_URL: "http://authzforce:8080/authzforce-ce"
+      AUTHZFORCE_DOMAIN: "arrowhead-520"
+      UPSTREAM_URL: "http://dynamicorch-xacml:8083"
+      PORT: "9209"
+      TLS_PORT: "9208"
+      CA_URL: "http://profile-ca:8787"
+      CA_TLS_URL: "https://profile-ca:8788"
+      # CA-as-PIP (D4): point to profile-ca instead of separate pip service
+      PIP_URL: "http://profile-ca:8787"
+    ports:
+      - "9208:9208"
+      - "9209:9209"
+    depends_on:
+      pap:
+        condition: service_healthy
+      profile-ca:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9209/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -- Kafdrop -- Kafka web UI -------------------------------------------------
+
+  kafdrop:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/kafdrop.Dockerfile
+    ports:
+      - "9000:9000"
+    environment:
+      CERTS_DIR: /certs
+    volumes:
+      - certs:/certs:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cert-provisioner:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/actuator/health 2>/dev/null | grep -q UP || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # -- Dashboard ---------------------------------------------------------------
+
+  dashboard:
+    build:
+      context: ../
+      dockerfile: deploy/dockerfiles/dashboard.Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      cert-provisioner:
+        condition: service_completed_successfully
+
+volumes:
+  certs:
+  profile-ca-data:
+  serviceregistry-data:
+  authentication-data:
+  consumerauth-data:

@@ -1,0 +1,186 @@
+package main
+
+import (
+	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"time"
+
+	az "arrowhead/authzforce"
+)
+
+const (
+	policySetID = "urn:arrowhead:exp5:telemetry"
+)
+
+// PolicyDef mirrors the ConsumerAuthorization PolicyDef wire type.
+type PolicyDef struct {
+	PolicyType string   `json:"policyType"`
+	PolicyList []string `json:"policyList,omitempty"`
+}
+
+// AuthPolicy mirrors the ConsumerAuthorization AuthPolicy wire type.
+type AuthPolicy struct {
+	InstanceID    string    `json:"instanceId"`
+	Provider      string    `json:"provider"`
+	TargetType    string    `json:"targetType"`
+	Target        string    `json:"target"`
+	DefaultPolicy PolicyDef `json:"defaultPolicy"`
+}
+
+// LookupResponse is returned by POST /consumerauthorization/authorization/mgmt/query.
+type LookupResponse struct {
+	Policies   []AuthPolicy `json:"policies"`
+	Count      int          `json:"count"`
+	TotalCount int          `json:"totalCount"`
+}
+
+// syncer holds the sync state: AuthzForce client, domain ID, current policy
+// version counter, and the last known grant count for change detection.
+type syncer struct {
+	client       *az.Client
+	caURL        string
+	authToken    string
+	httpClient   *http.Client
+	domainExtID  string // AuthzForce externalId (from AUTHZFORCE_DOMAIN env)
+	domainID     string
+	version      int
+	grantsCount  int
+	lastSyncedAt time.Time
+}
+
+func newSyncer(client *az.Client, caURL string, httpClient *http.Client) *syncer {
+	return &syncer{client: client, caURL: caURL, httpClient: httpClient}
+}
+
+func (s *syncer) setToken(tok string) { s.authToken = tok }
+
+// init creates or looks up the AuthzForce domain and performs the first sync.
+func (s *syncer) init(domainExtID string) error {
+	id, err := s.client.EnsureDomain(domainExtID)
+	if err != nil {
+		return fmt.Errorf("EnsureDomain: %w", err)
+	}
+	s.domainExtID = domainExtID
+	s.domainID = id
+	return s.sync()
+}
+
+// sync fetches CA policies, compiles them into a XACML policy, and pushes it to
+// AuthzForce. Increments the version counter on each call.
+func (s *syncer) sync() error {
+	policies, err := s.fetchPolicies()
+	if err != nil {
+		return fmt.Errorf("fetchRules: %w", err)
+	}
+
+	// Expand WHITELIST policies into (consumer, service, provider) grants.
+	// Each WHITELIST policy lists consumers that may access the provider's service.
+	// ALL and BLACKLIST types are logged and skipped — XACML requires enumerated subjects.
+	grants := make([]az.Grant, 0)
+	for _, p := range policies {
+		switch p.DefaultPolicy.PolicyType {
+		case "WHITELIST":
+			for _, consumer := range p.DefaultPolicy.PolicyList {
+				grants = append(grants, az.Grant{
+					Consumer: consumer,
+					Service:  p.Target,
+					Provider: p.Provider,
+				})
+			}
+		case "ALL":
+			log.Printf("[policy-sync] skipping policy %s (policyType=ALL cannot be represented as enumerated XACML subjects)", p.InstanceID)
+		default:
+			log.Printf("[policy-sync] skipping policy %s (unsupported policyType=%s)", p.InstanceID, p.DefaultPolicy.PolicyType)
+		}
+	}
+
+	s.version++
+	ver := strconv.Itoa(s.version)
+	policyXML := az.BuildPolicy(policySetID, ver, grants)
+
+	if err := s.client.SetPolicy(s.domainID, policyXML, policySetID, ver); err != nil {
+		return fmt.Errorf("SetPolicy: %w", err)
+	}
+	s.grantsCount = len(grants)
+	s.lastSyncedAt = time.Now()
+	return nil
+}
+
+// fetchPolicies calls POST /consumerauthorization/authorization/mgmt/query with an
+// empty body to retrieve all stored authorization policies.
+func (s *syncer) fetchPolicies() ([]AuthPolicy, error) {
+	req, err := http.NewRequest(http.MethodPost,
+		s.caURL+"/consumerauthorization/authorization/mgmt/query",
+		bytes.NewBufferString("{}"))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.authToken)
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ConsumerAuth lookup returned %d", resp.StatusCode)
+	}
+	var lr LookupResponse
+	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
+		return nil, err
+	}
+	return lr.Policies, nil
+}
+
+// buildHTTPClient returns an *http.Client. When TLS_CERT_FILE, TLS_KEY_FILE, and
+// TLS_CA_FILE environment variables are all set, the client uses mutual TLS so that
+// policy-sync can call a TLS-enabled ConsumerAuthorization service.
+// Falls back to a plain http.Client when any variable is absent (backward-compatible
+// with experiments that use plain HTTP ConsumerAuthorization).
+func buildHTTPClient() *http.Client {
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile  := os.Getenv("TLS_KEY_FILE")
+	caFile   := os.Getenv("TLS_CA_FILE")
+	if certFile == "" || keyFile == "" || caFile == "" {
+		return &http.Client{Timeout: 10 * time.Second}
+	}
+	tlsCfg, err := loadClientTLS(certFile, keyFile, caFile)
+	if err != nil {
+		// Log and fall back to plain HTTP rather than crashing.
+		fmt.Printf("[policy-sync] TLS client config error: %v — falling back to plain HTTP\n", err)
+		return &http.Client{Timeout: 10 * time.Second}
+	}
+	return &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   10 * time.Second,
+	}
+}
+
+func loadClientTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
+	caData, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA file %q: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caData) {
+		return nil, fmt.Errorf("parse CA PEM from %q", caFile)
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load key pair (%s, %s): %w", certFile, keyFile, err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
+}

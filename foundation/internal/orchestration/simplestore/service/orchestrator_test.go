@@ -1,0 +1,277 @@
+package service_test
+
+import (
+	"testing"
+
+	orchmodel "arrowhead/foundation/internal/orchestration/model"
+	"arrowhead/foundation/internal/orchestration/simplestore/model"
+	"arrowhead/foundation/internal/orchestration/simplestore/repository"
+	"arrowhead/foundation/internal/orchestration/simplestore/service"
+)
+
+func newOrchestrator() *service.SimpleStoreOrchestrator {
+	return service.NewSimpleStoreOrchestrator(repository.NewMemoryRepository())
+}
+
+func validCreateRule() model.CreateRuleRequest {
+	return model.CreateRuleRequest{
+		ConsumerSystemName: "consumer-app",
+		ServiceDefinition:  "temperature-service",
+		Provider: orchmodel.System{
+			SystemName: "sensor-1",
+			Address:    "10.0.0.1",
+			Port:       9000,
+		},
+		ServiceUri: "/temperature",
+		Interfaces: []string{"HTTP-INSECURE-JSON"},
+	}
+}
+
+// ---- CreateRule ----
+
+func TestCreateRuleValid(t *testing.T) {
+	orch := newOrchestrator()
+	rule, err := orch.CreateRule(validCreateRule())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rule.ID == "" {
+		t.Error("expected non-empty UUID ID")
+	}
+	if rule.ConsumerSystemName != "consumer-app" {
+		t.Errorf("ConsumerSystemName = %q", rule.ConsumerSystemName)
+	}
+}
+
+func TestCreateRuleValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*model.CreateRuleRequest)
+	}{
+		{"empty consumer", func(r *model.CreateRuleRequest) { r.ConsumerSystemName = "" }},
+		{"whitespace consumer", func(r *model.CreateRuleRequest) { r.ConsumerSystemName = "  " }},
+		{"empty service", func(r *model.CreateRuleRequest) { r.ServiceDefinition = "" }},
+		{"empty provider name", func(r *model.CreateRuleRequest) { r.Provider.SystemName = "" }},
+		{"empty serviceUri", func(r *model.CreateRuleRequest) { r.ServiceUri = "" }},
+		{"empty interfaces", func(r *model.CreateRuleRequest) { r.Interfaces = nil }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := validCreateRule()
+			tc.mutate(&req)
+			_, err := newOrchestrator().CreateRule(req)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+// ---- DeleteRule ----
+
+func TestDeleteRuleValid(t *testing.T) {
+	orch := newOrchestrator()
+	rule, _ := orch.CreateRule(validCreateRule())
+	if err := orch.DeleteRule(rule.ID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp := orch.ListRules()
+	if resp.Count != 0 {
+		t.Errorf("expected 0 rules after delete, got %d", resp.Count)
+	}
+}
+
+func TestDeleteRuleNotFound(t *testing.T) {
+	orch := newOrchestrator()
+	if err := orch.DeleteRule("00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("expected error for nonexistent rule")
+	}
+}
+
+// ---- ListRules ----
+
+func TestListRulesEmpty(t *testing.T) {
+	orch := newOrchestrator()
+	resp := orch.ListRules()
+	if resp.Rules == nil {
+		t.Error("expected non-nil slice")
+	}
+	if resp.Count != 0 {
+		t.Errorf("expected 0, got %d", resp.Count)
+	}
+}
+
+func TestListRulesReturnsAll(t *testing.T) {
+	orch := newOrchestrator()
+	orch.CreateRule(validCreateRule())
+	req2 := validCreateRule()
+	req2.ConsumerSystemName = "other-consumer"
+	orch.CreateRule(req2)
+
+	resp := orch.ListRules()
+	if resp.Count != 2 {
+		t.Errorf("expected 2, got %d", resp.Count)
+	}
+}
+
+// ---- Orchestrate ----
+
+func TestOrchestrateMissingRequester(t *testing.T) {
+	orch := newOrchestrator()
+	_, err := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "temperature-service"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing requesterSystem.systemName")
+	}
+}
+
+func TestOrchestrateMissingService(t *testing.T) {
+	orch := newOrchestrator()
+	_, err := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem: orchmodel.System{SystemName: "consumer-app"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing serviceDefinition")
+	}
+}
+
+func TestOrchestrateMatch(t *testing.T) {
+	orch := newOrchestrator()
+	orch.CreateRule(validCreateRule())
+
+	resp, err := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem:  orchmodel.System{SystemName: "consumer-app"},
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "temperature-service"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(resp.Results))
+	}
+	if resp.Results[0].ProviderName != "sensor-1" {
+		t.Errorf("provider = %q", resp.Results[0].ProviderName)
+	}
+	if resp.Results[0].ServiceUri != "/temperature" {
+		t.Errorf("serviceUri = %q", resp.Results[0].ServiceUri)
+	}
+}
+
+func TestOrchestrateNoMatch(t *testing.T) {
+	orch := newOrchestrator()
+	orch.CreateRule(validCreateRule())
+
+	resp, err := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem:  orchmodel.System{SystemName: "consumer-app"},
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "unknown-service"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Results) != 0 {
+		t.Errorf("expected empty response, got %d", len(resp.Results))
+	}
+}
+
+func TestOrchestrateWrongConsumer(t *testing.T) {
+	orch := newOrchestrator()
+	orch.CreateRule(validCreateRule())
+
+	resp, _ := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem:  orchmodel.System{SystemName: "wrong-consumer"},
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "temperature-service"},
+	})
+	if len(resp.Results) != 0 {
+		t.Error("expected no match for wrong consumer")
+	}
+}
+
+func TestOrchestrateMultipleRulesReturnsAll(t *testing.T) {
+	orch := newOrchestrator()
+	orch.CreateRule(validCreateRule())
+	req2 := validCreateRule()
+	req2.Provider.SystemName = "sensor-2"
+	req2.Provider.Address = "10.0.0.2"
+	orch.CreateRule(req2)
+
+	resp, _ := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem:  orchmodel.System{SystemName: "consumer-app"},
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "temperature-service"},
+	})
+	if len(resp.Results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(resp.Results))
+	}
+}
+
+// ─── Step B: Tests for Step 24 ────────────────────────────────────────────────
+
+func TestOrchestrationResultHasCloudIdentifier(t *testing.T) {
+	orch := newOrchestrator()
+	orch.CreateRule(validCreateRule()) //nolint:errcheck
+	resp, err := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem:  orchmodel.System{SystemName: "consumer-app"},
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "temperature-service"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(resp.Results))
+	}
+	if resp.Results[0].CloudIdentifier != "LOCAL" {
+		t.Errorf("CloudIdentifier = %q, want \"LOCAL\"", resp.Results[0].CloudIdentifier)
+	}
+}
+
+// ─── Step 62 — SimpleStore model audit ───────────────────────────────────────
+
+// TestOrchestrationResultHasPriorityFromRule verifies that the rule priority is carried
+// through to the OrchestrationResult (model conformance, Step 62).
+func TestOrchestrationResultHasPriorityFromRule(t *testing.T) {
+	orch := newOrchestrator()
+	req := validCreateRule()
+	req.Priority = 3
+	orch.CreateRule(req) //nolint:errcheck
+
+	resp, err := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem:  orchmodel.System{SystemName: "consumer-app"},
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "temperature-service"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(resp.Results))
+	}
+	if resp.Results[0].Priority != 3 {
+		t.Errorf("Priority = %d, want 3", resp.Results[0].Priority)
+	}
+}
+
+// TestOrchestrationResultHasProviderAddress verifies that ProviderAddress and ProviderPort
+// are set from the rule's Provider system (model conformance, Step 62).
+func TestOrchestrationResultHasProviderAddress(t *testing.T) {
+	orch := newOrchestrator()
+	req := validCreateRule()
+	req.Provider = orchmodel.System{SystemName: "sensor-1", Address: "192.168.1.10", Port: 9090}
+	orch.CreateRule(req) //nolint:errcheck
+
+	resp, err := orch.Orchestrate(orchmodel.OrchestrationRequest{
+		RequesterSystem:  orchmodel.System{SystemName: "consumer-app"},
+		RequestedService: orchmodel.ServiceFilter{ServiceDefinition: "temperature-service"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(resp.Results))
+	}
+	r := resp.Results[0]
+	if r.ProviderAddress != "192.168.1.10" {
+		t.Errorf("ProviderAddress = %q, want 192.168.1.10", r.ProviderAddress)
+	}
+	if r.ProviderPort != 9090 {
+		t.Errorf("ProviderPort = %d, want 9090", r.ProviderPort)
+	}
+}

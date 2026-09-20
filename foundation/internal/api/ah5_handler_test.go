@@ -1,0 +1,1524 @@
+package api_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+
+	"arrowhead/foundation/internal/api"
+	"arrowhead/foundation/internal/model"
+	"arrowhead/foundation/internal/repository"
+	"arrowhead/foundation/internal/service"
+)
+
+func newAH5Handler() http.Handler {
+	return api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "", "", "")
+}
+
+func newAH5HandlerWithRegisterAuth(authURL string) http.Handler {
+	return api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "", "", authURL)
+}
+
+func ah5Post(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func ah5Put(t *testing.T, h http.Handler, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func ah5Delete(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// ─── Device Discovery ─────────────────────────────────────────────────────────
+
+func TestAH5DeviceRegisterCreated(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/device-discovery/register", map[string]any{
+		"name": "GW1",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var dev model.Device
+	json.NewDecoder(w.Body).Decode(&dev) //nolint
+	if dev.Name != "GW1" {
+		t.Errorf("Name = %q", dev.Name)
+	}
+}
+
+func TestAH5DeviceRegisterUpdated(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/device-discovery/register", map[string]any{"name": "GW1"})
+	w := ah5Post(t, h, "/serviceregistry/device-discovery/register", map[string]any{
+		"name": "GW1", "metadata": map[string]string{"k": "v"},
+	})
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for update, got %d", w.Code)
+	}
+}
+
+func TestAH5DeviceRegisterMissingName(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/device-discovery/register", map[string]any{})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAH5DeviceRegisterWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	req := httptest.NewRequest(http.MethodGet, "/serviceregistry/device-discovery/register", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestAH5DeviceLookupAll(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/device-discovery/register", map[string]any{"name": "D1"})
+	ah5Post(t, h, "/serviceregistry/device-discovery/register", map[string]any{"name": "D2"})
+	w := ah5Post(t, h, "/serviceregistry/device-discovery/lookup", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.DeviceLookupResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 2 {
+		t.Errorf("Count = %d, want 2", resp.Count)
+	}
+}
+
+func TestAH5DeviceLookupWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	req := httptest.NewRequest(http.MethodGet, "/serviceregistry/device-discovery/lookup", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestAH5DeviceRevokeFound(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/device-discovery/register", map[string]any{"name": "GW3"})
+	w := ah5Delete(t, h, "/serviceregistry/device-discovery/revoke/GW3")
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestAH5DeviceRevokeNotFound(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Delete(t, h, "/serviceregistry/device-discovery/revoke/missing")
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+}
+
+func TestAH5DeviceRevokeWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	req := httptest.NewRequest(http.MethodGet, "/serviceregistry/device-discovery/revoke/x", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// ─── System Discovery ─────────────────────────────────────────────────────────
+
+func TestAH5SystemRegisterCreated(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/system-discovery/register", map[string]any{
+		"name":    "MySystem",
+		"version": "1.0",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var sys model.AH5System
+	json.NewDecoder(w.Body).Decode(&sys) //nolint
+	if sys.Name != "MySystem" {
+		t.Errorf("Name = %q", sys.Name)
+	}
+}
+
+func TestAH5SystemRegisterUpdated(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/system-discovery/register", map[string]any{"name": "Sys1", "version": "1"})
+	w := ah5Post(t, h, "/serviceregistry/system-discovery/register", map[string]any{"name": "Sys1", "version": "2"})
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for update, got %d", w.Code)
+	}
+}
+
+func TestAH5SystemRegisterMissingName(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/system-discovery/register", map[string]any{})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAH5SystemLookupAll(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/system-discovery/register", map[string]any{"name": "Sys1"})
+	ah5Post(t, h, "/serviceregistry/system-discovery/register", map[string]any{"name": "Sys2"})
+	w := ah5Post(t, h, "/serviceregistry/system-discovery/lookup", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.SystemLookupResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 2 {
+		t.Errorf("Count = %d, want 2", resp.Count)
+	}
+}
+
+func TestAH5SystemRevokeFound(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/system-discovery/register", map[string]any{"name": "RemSys"})
+	w := ah5Delete(t, h, "/serviceregistry/system-discovery/revoke?name=RemSys")
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestAH5SystemRevokeNotFound(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Delete(t, h, "/serviceregistry/system-discovery/revoke?name=ghost")
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+}
+
+func TestAH5SystemRevokeMissingName(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Delete(t, h, "/serviceregistry/system-discovery/revoke")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// ─── Service Discovery ────────────────────────────────────────────────────────
+
+func TestAH5ServiceRegisterCreated(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "Prov1",
+		"serviceDefinitionName": "temperature",
+		"version":               "1.0",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var inst model.AH5ServiceInstance
+	json.NewDecoder(w.Body).Decode(&inst) //nolint
+	if inst.InstanceID == "" {
+		t.Error("expected instanceId")
+	}
+	if inst.ServiceDefinitionName != "temperature" {
+		t.Errorf("ServiceDefinitionName = %q", inst.ServiceDefinitionName)
+	}
+}
+
+func TestAH5ServiceRegisterUpdated(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName": "P1", "serviceDefinitionName": "s", "version": "1",
+	})
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName": "P1", "serviceDefinitionName": "s", "version": "1",
+		"metadata": map[string]string{"k": "v"},
+	})
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for update, got %d", w.Code)
+	}
+}
+
+func TestAH5ServiceRegisterMissingSystemName(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"serviceDefinitionName": "svc",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAH5ServiceRegisterMissingDefinitionName(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName": "Sys1",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAH5ServiceLookupByProvider(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName": "P1", "serviceDefinitionName": "svc",
+	})
+	ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName": "P2", "serviceDefinitionName": "svc",
+	})
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/lookup", map[string]any{
+		"providerNames": []string{"P1"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.ServiceLookupResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+// ─── Cycle 16.2 — ServiceLookupRequest at-least-one-filter ───────────────────
+
+func TestAH5ServiceLookupRequiresFilter(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/lookup", map[string]any{})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("empty lookup: expected 400, got %d", w.Code)
+	}
+}
+
+// ─── Cycle 16.1 — Structured and flat-string interface backward-compat ────────
+
+func TestAH5ServiceRegisterStructuredInterface(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "IntfSys",
+		"serviceDefinitionName": "tempService",
+		"version":               "1.0.0",
+		"interfaces": []map[string]any{
+			{"templateName": "http-json", "protocol": "http", "policy": "NONE"},
+		},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAH5ServiceRegisterFlatStringInterfaceBackwardCompat(t *testing.T) {
+	h := newAH5Handler()
+	// Flat string interface (old style) must still be accepted.
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "FlatSys",
+		"serviceDefinitionName": "flatSvc",
+		"version":               "1.0.0",
+		"interfaces":            []string{"HTTP-INSECURE-JSON"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("backward-compat flat string interface: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var inst model.AH5ServiceInstance
+	json.NewDecoder(w.Body).Decode(&inst) //nolint
+	if len(inst.Interfaces) != 1 {
+		t.Fatalf("expected 1 interface, got %d", len(inst.Interfaces))
+	}
+	if inst.Interfaces[0].TemplateName != "HTTP-INSECURE-JSON" {
+		t.Errorf("TemplateName = %q, want HTTP-INSECURE-JSON", inst.Interfaces[0].TemplateName)
+	}
+}
+
+// ─── Cycle 16.3 — Template-absent registration accepted without validation ────
+
+func TestInterfaceValidationTemplateAbsent(t *testing.T) {
+	h := newAH5Handler()
+	// No interface template registered — should be accepted without validation.
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "NoTmplSys",
+		"serviceDefinitionName": "noTmplSvc",
+		"version":               "1.0.0",
+		"interfaces":            []map[string]any{{"templateName": "custom", "protocol": "mqtt", "policy": "NONE"}},
+	})
+	if w.Code != http.StatusCreated {
+		t.Errorf("absent template: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAH5ServiceRegisterInvalidPolicy(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "BadPolSys",
+		"serviceDefinitionName": "badPolSvc",
+		"interfaces":            []map[string]any{{"templateName": "httpJson", "protocol": "http", "policy": "INVALID_POLICY"}},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("invalid policy: expected 400, got %d", w.Code)
+	}
+}
+
+func TestAH5ServiceRevokeFound(t *testing.T) {
+	h := newAH5Handler()
+	w1 := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName": "P1", "serviceDefinitionName": "s",
+	})
+	var inst model.AH5ServiceInstance
+	json.NewDecoder(w1.Body).Decode(&inst) //nolint
+	w2 := ah5Delete(t, h, "/serviceregistry/service-discovery/revoke/"+inst.InstanceID)
+	if w2.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w2.Code)
+	}
+}
+
+func TestAH5ServiceRevokeNotFound(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Delete(t, h, "/serviceregistry/service-discovery/revoke/9999")
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+}
+
+func TestAH5DeviceRevoke423WhenSystemDependent(t *testing.T) {
+	h := newAH5Handler()
+	// Register device
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST",
+		"/serviceregistry/device-discovery/register",
+		strings.NewReader(`{"name":"GW01"}`)))
+	// Register system referencing device
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST",
+		"/serviceregistry/system-discovery/register",
+		strings.NewReader(`{"name":"Sensor1","deviceName":"GW01","addresses":[{"type":"IP","address":"192.0.2.1"}]}`)))
+	// Attempt revoke
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("DELETE",
+		"/serviceregistry/device-discovery/revoke/GW01", nil))
+	if rr.Code != http.StatusLocked {
+		t.Errorf("expected 423, got %d", rr.Code)
+	}
+}
+
+func TestAH5ServiceRevokeByCompositeID(t *testing.T) {
+	h := newAH5Handler()
+	// Register a service — version defaults to 1.0.0
+	body := `{"systemName":"Provider1","serviceDefinitionName":"temperature","version":"1.0.0"}`
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/service-discovery/register", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated && rr.Code != http.StatusOK {
+		t.Fatalf("register failed: %d", rr.Code)
+	}
+
+	// Revoke using URL-encoded composite ID
+	encodedID := url.PathEscape("Provider1|temperature|1.0.0")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("DELETE",
+		"/serviceregistry/service-discovery/revoke/"+encodedID, nil))
+	if rr2.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+}
+
+// ─── Management — Devices ─────────────────────────────────────────────────────
+
+func TestAH5MgmtDeviceCreate(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/mgmt/devices", map[string]any{
+		"devices": []map[string]any{{"name": "D1"}, {"name": "D2"}},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.DeviceListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 2 {
+		t.Errorf("Count = %d, want 2", resp.Count)
+	}
+}
+
+func TestAH5MgmtDeviceCreateDuplicate(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/devices", map[string]any{
+		"devices": []map[string]any{{"name": "D1"}},
+	})
+	w := ah5Post(t, h, "/serviceregistry/mgmt/devices", map[string]any{
+		"devices": []map[string]any{{"name": "D1"}},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAH5MgmtDeviceQuery(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/devices", map[string]any{
+		"devices": []map[string]any{{"name": "D1"}},
+	})
+	w := ah5Post(t, h, "/serviceregistry/mgmt/devices/query", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.DeviceListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+func TestAH5MgmtDeviceUpdate(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/devices", map[string]any{
+		"devices": []map[string]any{{"name": "D1", "metadata": map[string]string{"v": "1"}}},
+	})
+	w := ah5Put(t, h, "/serviceregistry/mgmt/devices", map[string]any{
+		"devices": []map[string]any{{"name": "D1", "metadata": map[string]string{"v": "2"}}},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.DeviceListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Devices[0].Metadata["v"] != "2" {
+		t.Errorf("metadata not updated: %v", resp.Devices[0].Metadata)
+	}
+}
+
+func TestAH5MgmtDeviceRemove(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/devices", map[string]any{
+		"devices": []map[string]any{{"name": "D1"}, {"name": "D2"}},
+	})
+	w := ah5Delete(t, h, "/serviceregistry/mgmt/devices?names=D1")
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	qw := ah5Post(t, h, "/serviceregistry/mgmt/devices/query", map[string]any{})
+	var resp model.DeviceListResponse
+	json.NewDecoder(qw.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1 after remove", resp.Count)
+	}
+}
+
+// ─── Management — Systems ─────────────────────────────────────────────────────
+
+func TestAH5MgmtSystemCreate(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/mgmt/systems", map[string]any{
+		"systems": []map[string]any{{"name": "Sys1", "version": "1.0"}},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.SystemListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+func TestAH5MgmtSystemUpdate(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/systems", map[string]any{
+		"systems": []map[string]any{{"name": "Sys1", "version": "1"}},
+	})
+	w := ah5Put(t, h, "/serviceregistry/mgmt/systems", map[string]any{
+		"systems": []map[string]any{{"name": "Sys1", "version": "2"}},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.SystemListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Systems[0].Version != "2" {
+		t.Error("version not updated")
+	}
+}
+
+func TestAH5MgmtSystemRemove(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/systems", map[string]any{
+		"systems": []map[string]any{{"name": "Sys1"}, {"name": "Sys2"}},
+	})
+	w := ah5Delete(t, h, "/serviceregistry/mgmt/systems?names=Sys1")
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+// ─── Management — Service Definitions ────────────────────────────────────────
+
+func TestAH5MgmtServiceDefCreate(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/mgmt/service-definitions", map[string]any{
+		"serviceDefinitionNames": []string{"temp", "humidity"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.ServiceDefinitionListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 2 {
+		t.Errorf("Count = %d, want 2", resp.Count)
+	}
+}
+
+func TestAH5MgmtServiceDefQuery(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/service-definitions", map[string]any{
+		"serviceDefinitionNames": []string{"a", "b"},
+	})
+	w := ah5Post(t, h, "/serviceregistry/mgmt/service-definitions/query", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.ServiceDefinitionListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 2 {
+		t.Errorf("Count = %d, want 2", resp.Count)
+	}
+}
+
+func TestAH5MgmtServiceDefRemove(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/service-definitions", map[string]any{
+		"serviceDefinitionNames": []string{"a", "b"},
+	})
+	w := ah5Delete(t, h, "/serviceregistry/mgmt/service-definitions?names=a")
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+// ─── Management — Interface Templates ────────────────────────────────────────
+
+func TestAH5MgmtInterfaceTemplateCreate(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/mgmt/interface-templates", map[string]any{
+		"interfaceTemplates": []map[string]any{
+			{"name": "http_secure_json", "protocol": "HTTP"},
+		},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.InterfaceTemplateListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+func TestAH5MgmtInterfaceTemplateQuery(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/interface-templates", map[string]any{
+		"interfaceTemplates": []map[string]any{{"name": "t1", "protocol": "HTTP"}},
+	})
+	w := ah5Post(t, h, "/serviceregistry/mgmt/interface-templates/query", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.InterfaceTemplateListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+func TestAH5MgmtInterfaceTemplateRemove(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/interface-templates", map[string]any{
+		"interfaceTemplates": []map[string]any{{"name": "t1", "protocol": "HTTP"}, {"name": "t2", "protocol": "HTTP"}},
+	})
+	w := ah5Delete(t, h, "/serviceregistry/mgmt/interface-templates?names=t1")
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+// ─── Management — Service Instances ──────────────────────────────────────────
+
+func TestAH5MgmtServiceInstanceCreate(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/mgmt/service-instances", map[string]any{
+		"instances": []map[string]any{
+			{"systemName": "Sys1", "serviceDefinitionName": "svc"},
+		},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.ServiceListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+func TestAH5MgmtServiceInstanceQuery(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/service-instances", map[string]any{
+		"instances": []map[string]any{
+			{"systemName": "Sys1", "serviceDefinitionName": "a"},
+			{"systemName": "Sys1", "serviceDefinitionName": "b"},
+		},
+	})
+	w := ah5Post(t, h, "/serviceregistry/mgmt/service-instances/query", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp model.ServiceListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 2 {
+		t.Errorf("Count = %d, want 2", resp.Count)
+	}
+}
+
+func TestAH5MgmtServiceInstanceUpdate(t *testing.T) {
+	h := newAH5Handler()
+	cw := ah5Post(t, h, "/serviceregistry/mgmt/service-instances", map[string]any{
+		"instances": []map[string]any{{"systemName": "Sys1", "serviceDefinitionName": "svc", "expiresAt": "2025-01-01T00:00:00Z"}},
+	})
+	var cr model.ServiceListResponse
+	json.NewDecoder(cw.Body).Decode(&cr) //nolint
+	id := cr.Instances[0].InstanceID
+
+	w := ah5Put(t, h, "/serviceregistry/mgmt/service-instances", map[string]any{
+		"instances": []map[string]any{{"instanceId": id, "expiresAt": "2027-01-01T00:00:00Z"}},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.ServiceListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Instances[0].ExpiresAt != "2027-01-01T00:00:00Z" {
+		t.Errorf("ExpiresAt = %q", resp.Instances[0].ExpiresAt)
+	}
+}
+
+func TestAH5MgmtServiceInstanceRemove(t *testing.T) {
+	h := newAH5Handler()
+	cw := ah5Post(t, h, "/serviceregistry/mgmt/service-instances", map[string]any{
+		"instances": []map[string]any{
+			{"systemName": "Sys1", "serviceDefinitionName": "a"},
+			{"systemName": "Sys1", "serviceDefinitionName": "b"},
+		},
+	})
+	var cr model.ServiceListResponse
+	json.NewDecoder(cw.Body).Decode(&cr) //nolint
+	id := cr.Instances[0].InstanceID
+
+	w := ah5Delete(t, h, "/serviceregistry/mgmt/service-instances?serviceInstances="+id)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	qw := ah5Post(t, h, "/serviceregistry/mgmt/service-instances/query", map[string]any{})
+	var qr model.ServiceListResponse
+	json.NewDecoder(qw.Body).Decode(&qr) //nolint
+	if qr.Count != 1 {
+		t.Errorf("Count = %d, want 1", qr.Count)
+	}
+}
+
+// ─── Coverage: uncovered method-not-allowed and query paths ──────────────────
+
+func TestAH5MgmtSystemQuery(t *testing.T) {
+	h := newAH5Handler()
+	ah5Post(t, h, "/serviceregistry/mgmt/systems", map[string]any{
+		"systems": []map[string]any{{"name": "Sys1"}},
+	})
+	w := ah5Post(t, h, "/serviceregistry/mgmt/systems/query", map[string]any{
+		"systemNames": []string{"Sys1"},
+	})
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.SystemListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+func TestAH5SystemRegisterWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/system-discovery/register", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5ServiceRegisterWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/service-discovery/register", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5SystemLookupWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/system-discovery/lookup", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5ServiceLookupWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/service-discovery/lookup", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5ServiceRevokeWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST", "/serviceregistry/service-discovery/revoke/someId", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5MgmtDevicesQueryWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/mgmt/devices/query", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5MgmtSystemsQueryWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/mgmt/systems/query", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5MgmtServiceDefsQueryWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/mgmt/service-definitions/query", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5MgmtServiceInstancesQueryWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/mgmt/service-instances/query", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAH5MgmtInterfaceTemplatesQueryWrongMethod(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/serviceregistry/mgmt/interface-templates/query", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+// ─── Step 4: naming convention validation ─────────────────────────────────────
+
+func TestAH5SystemRegister_InvalidNameLowerStart(t *testing.T) {
+	h := newAH5Handler()
+	body := `{"name":"mySystem"}`
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/system-discovery/register", strings.NewReader(body)))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for non-PascalCase SystemName, got %d", rr.Code)
+	}
+}
+
+func TestAH5SystemRegister_ValidName(t *testing.T) {
+	h := newAH5Handler()
+	body := `{"name":"MySystem"}`
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/system-discovery/register", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated && rr.Code != http.StatusOK {
+		t.Errorf("expected 200/201 for valid SystemName, got %d: %s",
+			rr.Code, rr.Body.String())
+	}
+}
+
+func TestAH5DeviceRegister_InvalidNameLowercase(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/device-discovery/register",
+		strings.NewReader(`{"name":"gw01"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for lowercase DeviceName, got %d", rr.Code)
+	}
+}
+
+func TestAH5DeviceRegister_InvalidNameTrailingUnderscore(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/device-discovery/register",
+		strings.NewReader(`{"name":"GW01_"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for trailing underscore, got %d", rr.Code)
+	}
+}
+
+func TestAH5DeviceRegister_ValidName(t *testing.T) {
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/device-discovery/register",
+		strings.NewReader(`{"name":"GW01"}`)))
+	if rr.Code != http.StatusCreated && rr.Code != http.StatusOK {
+		t.Errorf("expected 200/201, got %d", rr.Code)
+	}
+}
+
+func TestAH5ServiceRegister_InvalidServiceDefNameUpperStart(t *testing.T) {
+	h := newAH5Handler()
+	body := `{"systemName":"Provider1","serviceDefinitionName":"Temperature","version":"1.0.0"}`
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/service-discovery/register", strings.NewReader(body)))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for UpperCase ServiceDefinitionName, got %d", rr.Code)
+	}
+}
+
+func TestAH5MgmtInterfaceTemplateCreate_InvalidName(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/mgmt/interface-templates", map[string]any{
+		"interfaceTemplates": []map[string]any{
+			{"name": "HTTP-SECURE-JSON", "protocol": "HTTP"},
+		},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for non-snake_case InterfaceTemplateName, got %d", w.Code)
+	}
+}
+
+// ─── Pagination ───────────────────────────────────────────────────────────────
+
+func TestAH5DeviceLookupPagination(t *testing.T) {
+	h := newAH5Handler()
+	// Seed 5 devices (names must be UPPER_SNAKE_CASE).
+	for i := 0; i < 5; i++ {
+		ah5Post(t, h, "/serviceregistry/device-discovery/register",
+			map[string]any{"name": fmt.Sprintf("DEV%d", i)})
+	}
+	// Query page 0, size 2.
+	w := ah5Post(t, h, "/serviceregistry/device-discovery/lookup", map[string]any{
+		"pagination": map[string]any{"pageNumber": 0, "pageSize": 2, "pageDirection": "ASC"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Count      int `json:"count"`
+		TotalCount int `json:"totalCount"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Count != 2 {
+		t.Errorf("count = %d, want 2", resp.Count)
+	}
+	if resp.TotalCount != 5 {
+		t.Errorf("totalCount = %d, want 5", resp.TotalCount)
+	}
+}
+
+func TestAH5DeviceLookupNoPaginationReturnsAll(t *testing.T) {
+	h := newAH5Handler()
+	for i := 0; i < 3; i++ {
+		ah5Post(t, h, "/serviceregistry/device-discovery/register",
+			map[string]any{"name": fmt.Sprintf("DA%d", i)})
+	}
+	w := ah5Post(t, h, "/serviceregistry/device-discovery/lookup", map[string]any{})
+	var resp struct {
+		Count      int `json:"count"`
+		TotalCount int `json:"totalCount"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Count != 3 {
+		t.Errorf("count = %d, want 3", resp.Count)
+	}
+	if resp.TotalCount != 3 {
+		t.Errorf("totalCount = %d, want 3", resp.TotalCount)
+	}
+}
+
+// ─── Step B: Tests for token-based system revoke (Step 22) ───────────────────
+
+func TestSystemRevokeUsesTokenIdentity(t *testing.T) {
+	// fake Auth server that returns systemName for a given token
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// path: /authentication/identity/verify/<token>
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "TargetSystem"})
+	}))
+	defer fakeAuth.Close()
+
+	store := service.NewAH5RegistryService(repository.NewAH5Store())
+	// register the system first
+	store.RegisterSystem(model.SystemRegistrationRequest{Name: "TargetSystem"})
+
+	h := api.NewAH5Handler(store, fakeAuth.URL, "", "")
+
+	// revoke using token (no ?name=)
+	req := httptest.NewRequest(http.MethodDelete, "/serviceregistry/mgmt/systems/revoke", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("want 204, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSystemRevokeWithoutBearerReturns401(t *testing.T) {
+	h := api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "http://localhost:9", "", "")
+	req := httptest.NewRequest(http.MethodDelete, "/serviceregistry/mgmt/systems/revoke", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("want 401, got %d", w.Code)
+	}
+}
+
+func TestSystemRevokeAuthUnreachableReturns401(t *testing.T) {
+	h := api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "http://localhost:1", "", "") // unreachable
+	req := httptest.NewRequest(http.MethodDelete, "/serviceregistry/mgmt/systems/revoke", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("want 401, got %d", w.Code)
+	}
+}
+
+// ─── Step 27 (G37): Management access policy ────────────────────────────────
+
+func TestMgmtOpenWhenMgmtAuthURLUnset(t *testing.T) {
+	// With mgmtAuthURL="" all management endpoints are open.
+	h := api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "", "", "")
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/mgmt/systems/query", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("open mode: want 200, got %d", w.Code)
+	}
+}
+
+func TestMgmtRequiresBearerWhenMgmtAuthURLSet(t *testing.T) {
+	fakeMgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "sysop-sys", "sysop": true}) //nolint:errcheck
+	}))
+	defer fakeMgmt.Close()
+
+	h := api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "", fakeMgmt.URL, "")
+
+	// no bearer → 401
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/mgmt/systems/query", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("no token: want 401, got %d", w.Code)
+	}
+}
+
+func TestMgmtValidSysopTokenSucceeds(t *testing.T) {
+	fakeMgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "sysop-sys", "sysop": true}) //nolint:errcheck
+	}))
+	defer fakeMgmt.Close()
+
+	h := api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "", fakeMgmt.URL, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/mgmt/systems/query", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer valid-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("valid sysop: want 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestMgmtNonSysopTokenForbidden(t *testing.T) {
+	fakeMgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "regular-sys", "sysop": false}) //nolint:errcheck
+	}))
+	defer fakeMgmt.Close()
+
+	h := api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "", fakeMgmt.URL, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/mgmt/systems/query", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer regular-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("non-sysop: want 403, got %d", w.Code)
+	}
+}
+
+func TestMgmtAuthUnreachableReturns401(t *testing.T) {
+	h := api.NewAH5Handler(service.NewAH5RegistryService(repository.NewAH5Store()), "", "http://localhost:1", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/mgmt/systems/query", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer some-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("auth unreachable: want 401, got %d", w.Code)
+	}
+}
+
+// ─── Step 33 (G10): Registration identity enforcement ────────────────────────
+
+func TestRegisterSystemMatchingTokenIdentitySucceeds(t *testing.T) {
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "SensorA", "verified": true}) //nolint:errcheck
+	}))
+	defer fakeAuth.Close()
+
+	h := newAH5HandlerWithRegisterAuth(fakeAuth.URL)
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/system-discovery/register",
+		strings.NewReader(`{"name":"SensorA","address":"localhost","port":8099}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer valid-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("matching identity: want 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterSystemMismatchedIdentityReturns403(t *testing.T) {
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "SensorA", "verified": true}) //nolint:errcheck
+	}))
+	defer fakeAuth.Close()
+
+	h := newAH5HandlerWithRegisterAuth(fakeAuth.URL)
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/system-discovery/register",
+		strings.NewReader(`{"name":"SensorB","address":"localhost","port":8099}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer valid-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("mismatched identity: want 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterSystemMissingBearerWithAuthURLReturns401(t *testing.T) {
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "SensorA", "verified": true}) //nolint:errcheck
+	}))
+	defer fakeAuth.Close()
+
+	h := newAH5HandlerWithRegisterAuth(fakeAuth.URL)
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/system-discovery/register",
+		strings.NewReader(`{"name":"SensorA","address":"localhost","port":8099}`))
+	req.Header.Set("Content-Type", "application/json")
+	// No Authorization header
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("missing bearer: want 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterSystemAuthUnreachableReturns401(t *testing.T) {
+	h := newAH5HandlerWithRegisterAuth("http://localhost:1") // non-listening port
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/system-discovery/register",
+		strings.NewReader(`{"name":"SensorA","address":"localhost","port":8099}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer some-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("auth unreachable: want 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterSystemNoAuthURLIsOpen(t *testing.T) {
+	h := newAH5Handler() // registerAuthURL = ""
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/system-discovery/register",
+		strings.NewReader(`{"name":"SensorA","address":"localhost","port":8099}`))
+	req.Header.Set("Content-Type", "application/json")
+	// No Authorization header — open mode
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("open mode: want 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterServiceMatchingTokenIdentitySucceeds(t *testing.T) {
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "SensorA", "verified": true}) //nolint:errcheck
+	}))
+	defer fakeAuth.Close()
+
+	h := newAH5HandlerWithRegisterAuth(fakeAuth.URL)
+	body := map[string]any{
+		"systemName":            "SensorA",
+		"serviceDefinitionName": "temperature",
+		"serviceUri":            "/temp",
+		"interfaces":            []string{"HTTP-INSECURE-JSON"},
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/service-discovery/register", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer valid-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("service register matching identity: want 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterServiceMismatchedIdentityReturns403(t *testing.T) {
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"systemName": "SensorA", "verified": true}) //nolint:errcheck
+	}))
+	defer fakeAuth.Close()
+
+	h := newAH5HandlerWithRegisterAuth(fakeAuth.URL)
+	body := map[string]any{
+		"systemName":            "SensorB", // mismatch
+		"serviceDefinitionName": "temperature",
+		"serviceUri":            "/temp",
+		"interfaces":            []string{"HTTP-INSECURE-JSON"},
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/service-discovery/register", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer valid-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("service register mismatch: want 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── Step 40 — PUT service-definitions and interface-templates ────────────────
+
+func TestMgmtServiceDefinitionsPutUpdatesEntry(t *testing.T) {
+	h := newAH5Handler()
+	// Create
+	ah5Post(t, h, "/serviceregistry/mgmt/service-definitions", map[string]any{
+		"serviceDefinitionNames": []string{"temperature"},
+	})
+	// PUT (update — name is the key, no other fields to change for ServiceDefinition,
+	// so we verify 200 and the entry is still present via query)
+	w := ah5Put(t, h, "/serviceregistry/mgmt/service-definitions", map[string]any{
+		"serviceDefinitionNames": []string{"temperature"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT service-definitions: want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.ServiceDefinitionListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+}
+
+func TestMgmtServiceDefinitionsPutUnknownReturns404(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Put(t, h, "/serviceregistry/mgmt/service-definitions", map[string]any{
+		"serviceDefinitionNames": []string{"does-not-exist"},
+	})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("PUT unknown service-definition: want 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestMgmtInterfaceTemplatesPutUpdatesEntry(t *testing.T) {
+	h := newAH5Handler()
+	// Create
+	ah5Post(t, h, "/serviceregistry/mgmt/interface-templates", map[string]any{
+		"interfaceTemplates": []map[string]any{
+			{"name": "http_json", "protocol": "HTTP"},
+		},
+	})
+	// PUT — update protocol field
+	w := ah5Put(t, h, "/serviceregistry/mgmt/interface-templates", map[string]any{
+		"interfaceTemplates": []map[string]any{
+			{"name": "http_json", "protocol": "HTTPS"},
+		},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT interface-templates: want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.InterfaceTemplateListResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint
+	if resp.Count != 1 {
+		t.Errorf("Count = %d, want 1", resp.Count)
+	}
+	if resp.InterfaceTemplates[0].Protocol != "HTTPS" {
+		t.Errorf("protocol = %q, want HTTPS", resp.InterfaceTemplates[0].Protocol)
+	}
+}
+
+func TestMgmtInterfaceTemplatesPutUnknownReturns404(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Put(t, h, "/serviceregistry/mgmt/interface-templates", map[string]any{
+		"interfaceTemplates": []map[string]any{
+			{"name": "no-such-template", "protocol": "HTTP"},
+		},
+	})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("PUT unknown interface-template: want 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── Step 41 — securityPolicy enum validation ─────────────────────────────────
+
+func TestServiceRegisterValidSecurityPolicy(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "SensorA",
+		"serviceDefinitionName": "temperature",
+		"serviceUri":            "/temp",
+		"interfaces": []map[string]any{
+			{"templateName": "http_json", "protocol": "HTTP", "policy": "TIME_LIMITED_TOKEN_AUTH"},
+		},
+	})
+	if w.Code != http.StatusCreated {
+		t.Errorf("valid policy: want 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestServiceRegisterInvalidSecurityPolicy(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "SensorA",
+		"serviceDefinitionName": "temperature",
+		"serviceUri":            "/temp",
+		"interfaces": []map[string]any{
+			{"templateName": "http_json", "protocol": "HTTP", "policy": "NOT_A_REAL_POLICY"},
+		},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("invalid policy: want 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── Step 66 — G60: service revoke edge cases ────────────────────────────────
+
+func TestAH5ServiceRevokeByCompositeID_Found(t *testing.T) {
+	// Registers then revokes a service by composite ID; asserts 200 OK.
+	h := newAH5Handler()
+	body := `{"systemName":"ProviderX","serviceDefinitionName":"humidity","version":"2.0.0"}`
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST",
+		"/serviceregistry/service-discovery/register", strings.NewReader(body)))
+	if rr.Code != http.StatusCreated && rr.Code != http.StatusOK {
+		t.Fatalf("register failed: %d %s", rr.Code, rr.Body.String())
+	}
+	encodedID := url.PathEscape("ProviderX|humidity|2.0.0")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("DELETE",
+		"/serviceregistry/service-discovery/revoke/"+encodedID, nil))
+	if rr2.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+}
+
+func TestAH5ServiceRevokeByCompositeID_NotFound(t *testing.T) {
+	// Attempt to revoke a non-existent composite ID — should return 204 No Content.
+	h := newAH5Handler()
+	encodedID := url.PathEscape("NoSuch|service|9.9.9")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("DELETE",
+		"/serviceregistry/service-discovery/revoke/"+encodedID, nil))
+	if rr.Code != http.StatusNoContent {
+		t.Errorf("expected 204 for not-found revoke, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAH5ServiceRevokeWithoutID_Returns400(t *testing.T) {
+	// DELETE /serviceregistry/service-discovery/revoke/ with empty segment — should return 400.
+	h := newAH5Handler()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("DELETE",
+		"/serviceregistry/service-discovery/revoke/", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty ID, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServiceRegisterAbsentSecurityPolicyDefaultsToNone(t *testing.T) {
+	h := newAH5Handler()
+	w := ah5Post(t, h, "/serviceregistry/service-discovery/register", map[string]any{
+		"systemName":            "SensorA",
+		"serviceDefinitionName": "temperature",
+		"serviceUri":            "/temp",
+		"interfaces":            []string{"HTTP-INSECURE-JSON"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Errorf("absent policy: want 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── Step 67 — G62: restricted service discovery policy ──────────────────────
+
+// newAH5HandlerWithPolicy creates an AH5Handler with a given discovery policy and
+// optional lookupAuthURL, forwarding empty strings for the other auth URLs.
+func newAH5HandlerWithPolicy(policy, lookupAuthURL string) http.Handler {
+	return api.NewAH5HandlerWithPolicy(
+		service.NewAH5RegistryService(repository.NewAH5Store()),
+		"", "", "", policy, lookupAuthURL,
+	)
+}
+
+// registerServiceForPolicy is a helper that registers a service instance.
+func registerServiceForPolicy(t *testing.T, h http.Handler, systemName, svcDef string, meta map[string]string) {
+	t.Helper()
+	body := map[string]any{
+		"systemName":            systemName,
+		"serviceDefinitionName": svcDef,
+	}
+	if meta != nil {
+		body["metadata"] = meta
+	}
+	rr := httptest.NewRecorder()
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/serviceregistry/service-discovery/register",
+		bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated && rr.Code != http.StatusOK {
+		t.Fatalf("register failed: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// lookupAllServices posts an empty lookup that matches all services by instanceIds being nil
+// but using providerNames as a broad search — we use service definitions to find our test ones.
+func lookupServicesByDef(t *testing.T, h http.Handler, svcDef, bearerToken string) model.ServiceLookupResponse {
+	t.Helper()
+	body := map[string]any{
+		"serviceDefinitionNames": []string{svcDef},
+	}
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/serviceregistry/service-discovery/lookup",
+		bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("lookup failed: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp model.ServiceLookupResponse
+	json.NewDecoder(rr.Body).Decode(&resp) //nolint
+	return resp
+}
+
+// TestDiscoveryPolicyOpen verifies that open policy (default) returns all services
+// without any Authorization header (regression guard).
+func TestDiscoveryPolicyOpen(t *testing.T) {
+	h := newAH5HandlerWithPolicy("open", "")
+	registerServiceForPolicy(t, h, "Provider1", "temperature", nil)
+	resp := lookupServicesByDef(t, h, "temperature", "")
+	if resp.Count != 1 {
+		t.Errorf("open policy: expected 1 result, got %d", resp.Count)
+	}
+}
+
+// TestDiscoveryPolicyRestrictedUnauthenticated verifies that restricted policy with no
+// Authorization header returns only services marked unrestrictedDiscovery=true.
+func TestDiscoveryPolicyRestrictedUnauthenticated(t *testing.T) {
+	h := newAH5HandlerWithPolicy("restricted", "")
+	registerServiceForPolicy(t, h, "ProviderA", "temperature", nil)
+	registerServiceForPolicy(t, h, "ProviderB", "temperature", map[string]string{"unrestrictedDiscovery": "true"})
+
+	resp := lookupServicesByDef(t, h, "temperature", "")
+	if resp.Count != 1 {
+		t.Errorf("restricted+unauthenticated: expected 1 result, got %d", resp.Count)
+	}
+	if resp.Count > 0 {
+		entry := resp.Entries[0]
+		if entry.Provider == nil || entry.Provider.Name != "ProviderB" {
+			t.Errorf("expected unrestricted provider ProviderB, got %v", entry.Provider)
+		}
+	}
+}
+
+// TestDiscoveryPolicyRestrictedValidToken verifies that restricted policy with a valid
+// token returns all services.
+func TestDiscoveryPolicyRestrictedValidToken(t *testing.T) {
+	// Mock auth server that returns {"verified": true}
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"verified":true}`)
+	}))
+	defer authSrv.Close()
+
+	h := newAH5HandlerWithPolicy("restricted", authSrv.URL)
+	registerServiceForPolicy(t, h, "ProviderA", "temperature", nil)
+	registerServiceForPolicy(t, h, "ProviderB", "temperature", map[string]string{"unrestrictedDiscovery": "true"})
+
+	resp := lookupServicesByDef(t, h, "temperature", "valid-token")
+	if resp.Count != 2 {
+		t.Errorf("restricted+valid token: expected 2 results, got %d", resp.Count)
+	}
+}
+
+// TestDiscoveryPolicyRestrictedAuthUnreachable verifies that restricted policy with an
+// unreachable auth server (fail-closed) returns only unrestricted services.
+func TestDiscoveryPolicyRestrictedAuthUnreachable(t *testing.T) {
+	// Port 1 is not listening
+	h := newAH5HandlerWithPolicy("restricted", "http://127.0.0.1:1")
+	registerServiceForPolicy(t, h, "ProviderA", "temperature", nil)
+	registerServiceForPolicy(t, h, "ProviderB", "temperature", map[string]string{"unrestrictedDiscovery": "true"})
+
+	resp := lookupServicesByDef(t, h, "temperature", "any-token")
+	if resp.Count != 1 {
+		t.Errorf("restricted+auth unreachable: expected 1 (unrestricted) result, got %d", resp.Count)
+	}
+}
