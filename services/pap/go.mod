@@ -1,6 +1,6 @@
 module arrowhead/pap
 
-go 1.22.0
+go 1.24.0
 
 require arrowhead/authzforce v0.0.0
 
