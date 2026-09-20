@@ -1,6 +1,6 @@
 module arrowhead/topic-auth-xacml
 
-go 1.22
+go 1.25.0
 
 require arrowhead/authzforce v0.0.0
 
