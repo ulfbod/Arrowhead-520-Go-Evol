@@ -2,6 +2,8 @@ name: Images
 
 # Builds the service images that downstream compose files pull, and pushes
 # them to GHCR as ghcr.io/ulfbod/<name>:<tag> when a version tag is pushed.
+# Each tag is a multi-arch index: linux/amd64 and linux/arm64. Go is
+# cross-compiled on the runner; QEMU runs only the final-stage apk step for arm64.
 
 on:
   push:
@@ -46,6 +48,9 @@ jobs:
             build-args: ""
     steps:
       - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -57,6 +62,7 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           build-args: ${{ matrix.build-args }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/ulfbod/${{ matrix.name }}:${{ github.ref_name }}
           labels: |

@@ -110,6 +110,11 @@ published, so downstream compose files pin an exact version.
 Example: tag `v0.1.0` produces `ghcr.io/ulfbod/profile-ca:v0.1.0`. The other
 services in `deploy/docker-compose.yml` are built from source only.
 
+Each image tag is a multi-arch index for `linux/amd64` and `linux/arm64` (from
+v0.1.1). Building these images locally needs BuildKit: use `docker compose build`
+or `docker buildx build`; plain `docker build` without buildx fails at the first
+step ("failed to parse platform").
+
 `deploy/docker-compose.consumerauth.yml` runs exactly these six services, with
 `dynamicorch-xacml` in `AUTH_BACKEND=consumerauth` mode (no authz-pdp or
 AuthzForce). `TestConsumerAuthMode` in `tests/integration/` checks that stack:
