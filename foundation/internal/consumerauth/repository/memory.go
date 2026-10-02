@@ -10,7 +10,8 @@ import (
 
 // Repository defines policy storage operations.
 type Repository interface {
-	Save(policy model.AuthPolicy) model.AuthPolicy
+	// Save upserts by instanceId. A non-nil error reports a failed write.
+	Save(policy model.AuthPolicy) (model.AuthPolicy, error)
 	Delete(instanceID string) bool
 	FindByInstanceID(instanceID string) (model.AuthPolicy, bool)
 	All() []model.AuthPolicy
@@ -26,11 +27,11 @@ func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{policies: make(map[string]model.AuthPolicy)}
 }
 
-func (r *MemoryRepository) Save(policy model.AuthPolicy) model.AuthPolicy {
+func (r *MemoryRepository) Save(policy model.AuthPolicy) (model.AuthPolicy, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.policies[policy.InstanceID] = policy
-	return policy
+	return policy, nil
 }
 
 func (r *MemoryRepository) Delete(instanceID string) bool {

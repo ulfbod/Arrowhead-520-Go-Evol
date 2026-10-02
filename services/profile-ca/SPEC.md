@@ -166,6 +166,11 @@ Summary count of all certificate records (including revoked).
 
 These endpoints require a valid client certificate issued by this CA.
 
+The TLS listener uses `tls.RequireAndVerifyClientCert` (`main.go`). A request
+without a client certificate, or with one not issued by this CA, fails in the
+TLS handshake: the client gets a TLS alert and no HTTP status at all. The
+endpoints are not served on the plain HTTP port (`404` there).
+
 ### `POST /ca/device-cert`
 
 Issue a Device certificate (OU=de). Requires Onboarding (OU=on) client cert.
@@ -174,7 +179,7 @@ Issue a Device certificate (OU=de). Requires Onboarding (OU=on) client cert.
 
 | Status | Condition |
 |---|---|
-| `401` | No client certificate |
+| `400` | Invalid JSON |
 | `403` | Client cert is not OU=on |
 
 ### `POST /ca/system-cert`
@@ -185,5 +190,5 @@ Issue a System certificate (OU=sy). Requires Device (OU=de) client cert.
 
 | Status | Condition |
 |---|---|
-| `401` | No client certificate |
+| `400` | Invalid JSON |
 | `403` | Client cert is not OU=de |

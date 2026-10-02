@@ -75,6 +75,8 @@ func NewHandler(svc *service.AuthService, mgmtAuthURL string, blClient blclient.
 // statusFor maps sentinel errors to HTTP status codes.
 func statusFor(err error) int {
 	switch {
+	case errors.Is(err, service.ErrStorage):
+		return http.StatusInternalServerError
 	case errors.Is(err, service.ErrDuplicateRule):
 		return http.StatusConflict
 	case errors.Is(err, service.ErrUnsupportedVariant):

@@ -49,9 +49,9 @@ func TestSQLiteServiceRegistryUpsert(t *testing.T) {
 		ServiceDefinition: "svc", ProviderSystem: model.System{SystemName: "p", Address: "a", Port: 1},
 		ServiceUri: "/old", Interfaces: []string{"HTTP"}, Version: 1,
 	}
-	saved1 := repo.Save(svc)
+	saved1, _ := repo.Save(svc)
 	svc.ServiceUri = "/new"
-	saved2 := repo.Save(svc)
+	saved2, _ := repo.Save(svc)
 
 	if saved1.ID != saved2.ID {
 		t.Errorf("upsert should return same ID: %d vs %d", saved1.ID, saved2.ID)

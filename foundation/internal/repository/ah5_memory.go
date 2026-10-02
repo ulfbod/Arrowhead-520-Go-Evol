@@ -38,7 +38,7 @@ func ah5Now() string {
 // ─── Devices ─────────────────────────────────────────────────────────────────
 
 // SaveDevice upserts a device. Returns the stored device and true if newly created.
-func (s *AH5Store) SaveDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool) {
+func (s *AH5Store) SaveDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := ah5Now()
@@ -46,7 +46,7 @@ func (s *AH5Store) SaveDevice(req *model.DeviceRegistrationRequest) (*model.Devi
 		d.Metadata = req.Metadata
 		d.Addresses = req.Addresses
 		d.UpdatedAt = t
-		return d, false
+		return d, false, nil
 	}
 	d := &model.Device{
 		Name:      req.Name,
@@ -56,7 +56,7 @@ func (s *AH5Store) SaveDevice(req *model.DeviceRegistrationRequest) (*model.Devi
 		UpdatedAt: t,
 	}
 	s.devices[req.Name] = d
-	return d, true
+	return d, true, nil
 }
 
 // GetDevice returns the device with the given name, or nil.
@@ -78,14 +78,14 @@ func (s *AH5Store) AllDevices() []*model.Device {
 }
 
 // DeleteDevice removes the named device. Returns false if not found.
-func (s *AH5Store) DeleteDevice(name string) bool {
+func (s *AH5Store) DeleteDevice(name string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.devices[name]; !ok {
-		return false
+		return false, nil
 	}
 	delete(s.devices, name)
-	return true
+	return true, nil
 }
 
 // CreateDevice creates a new device, failing if one already exists.
@@ -110,24 +110,24 @@ func (s *AH5Store) CreateDevice(req *model.DeviceRegistrationRequest) (*model.De
 
 // UpdateDevice updates an existing device. Returns the device and true on success;
 // nil and false if not found.
-func (s *AH5Store) UpdateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool) {
+func (s *AH5Store) UpdateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, ok := s.devices[req.Name]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	d.Metadata = req.Metadata
 	d.Addresses = req.Addresses
 	d.UpdatedAt = ah5Now()
-	return d, true
+	return d, true, nil
 }
 
 // ─── Systems ──────────────────────────────────────────────────────────────────
 
 // SaveSystem upserts a system. Returns the stored system and true if newly created.
 // If DeviceName is set, the device is looked up and embedded (nil if not found).
-func (s *AH5Store) SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool) {
+func (s *AH5Store) SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := ah5Now()
@@ -141,7 +141,7 @@ func (s *AH5Store) SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5S
 		sys.Addresses = req.Addresses
 		sys.Device = dev
 		sys.UpdatedAt = t
-		return sys, false
+		return sys, false, nil
 	}
 	sys := &model.AH5System{
 		Name:      req.Name,
@@ -153,7 +153,7 @@ func (s *AH5Store) SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5S
 		UpdatedAt: t,
 	}
 	s.systems[req.Name] = sys
-	return sys, true
+	return sys, true, nil
 }
 
 // GetSystem returns the named system, or nil.
@@ -175,14 +175,14 @@ func (s *AH5Store) AllSystems() []*model.AH5System {
 }
 
 // DeleteSystem removes the named system. Returns false if not found.
-func (s *AH5Store) DeleteSystem(name string) bool {
+func (s *AH5Store) DeleteSystem(name string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.systems[name]; !ok {
-		return false
+		return false, nil
 	}
 	delete(s.systems, name)
-	return true
+	return true, nil
 }
 
 // CreateSystem creates a new system, failing if one already exists.
@@ -211,12 +211,12 @@ func (s *AH5Store) CreateSystem(req *model.SystemRegistrationRequest) (*model.AH
 }
 
 // UpdateSystem updates an existing system. Returns false if not found.
-func (s *AH5Store) UpdateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool) {
+func (s *AH5Store) UpdateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sys, ok := s.systems[req.Name]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	var dev *model.Device
 	if req.DeviceName != "" {
@@ -227,7 +227,7 @@ func (s *AH5Store) UpdateSystem(req *model.SystemRegistrationRequest) (*model.AH
 	sys.Addresses = req.Addresses
 	sys.Device = dev
 	sys.UpdatedAt = ah5Now()
-	return sys, true
+	return sys, true, nil
 }
 
 // ─── Service Definitions ──────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ func (s *AH5Store) DeleteInterfaceTemplates(names []string) {
 // SaveServiceInstance upserts a service instance keyed by
 // (systemName, serviceDefinitionName, version). Returns the instance and true if
 // newly created (false if updated).
-func (s *AH5Store) SaveServiceInstance(req *model.ServiceRegistrationRequest) (*model.AH5ServiceInstance, bool) {
+func (s *AH5Store) SaveServiceInstance(req *model.ServiceRegistrationRequest) (*model.AH5ServiceInstance, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := ah5Now()
@@ -406,7 +406,7 @@ func (s *AH5Store) SaveServiceInstance(req *model.ServiceRegistrationRequest) (*
 			inst.Interfaces = req.Interfaces
 			inst.Provider = provider
 			inst.UpdatedAt = t
-			return inst, false
+			return inst, false, nil
 		}
 	}
 	id := compositeServiceID(req.SystemName, req.ServiceDefinitionName, req.Version)
@@ -422,7 +422,7 @@ func (s *AH5Store) SaveServiceInstance(req *model.ServiceRegistrationRequest) (*
 		UpdatedAt:             t,
 	}
 	s.serviceInstances[id] = inst
-	return inst, true
+	return inst, true, nil
 }
 
 // CreateServiceInstance creates a new service instance without upsert behaviour
@@ -458,18 +458,18 @@ func (s *AH5Store) CreateServiceInstance(req *model.ServiceCreateRequest) (*mode
 
 // UpdateServiceInstance updates an existing instance by instanceId.
 // Returns false if not found.
-func (s *AH5Store) UpdateServiceInstance(req *model.ServiceUpdateRequest) (*model.AH5ServiceInstance, bool) {
+func (s *AH5Store) UpdateServiceInstance(req *model.ServiceUpdateRequest) (*model.AH5ServiceInstance, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	inst, ok := s.serviceInstances[req.InstanceID]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	inst.ExpiresAt = req.ExpiresAt
 	inst.Metadata = req.Metadata
 	inst.Interfaces = req.Interfaces
 	inst.UpdatedAt = ah5Now()
-	return inst, true
+	return inst, true, nil
 }
 
 // AllServiceInstances returns all stored service instances.
@@ -485,14 +485,14 @@ func (s *AH5Store) AllServiceInstances() []*model.AH5ServiceInstance {
 
 // DeleteServiceInstance removes the instance with the given ID.
 // Returns false if not found.
-func (s *AH5Store) DeleteServiceInstance(id string) bool {
+func (s *AH5Store) DeleteServiceInstance(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.serviceInstances[id]; !ok {
-		return false
+		return false, nil
 	}
 	delete(s.serviceInstances, id)
-	return true
+	return true, nil
 }
 
 // DeleteServiceInstances removes multiple instances by ID (silent if not found).

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	pb "arrowhead/core/proto/authorize"
@@ -176,7 +178,8 @@ func (g *GRPCDecider) Decide(domainID, subject, service, provider, action string
 // CADecider implements AuthDecider by calling the AH5 ConsumerAuthorization
 // service. It is the fallback when AUTH_BACKEND=consumerauth.
 //
-// Mapping: subject→consumerSystemName, provider→providerSystemName, service→serviceDefinition.
+// Mapping: subject→consumer, provider→provider, service→target with
+// targetType SERVICE_DEF.
 // domainID and action are ignored (CA has no domain/action concept).
 type CADecider struct {
 	baseURL string
@@ -191,26 +194,32 @@ func NewCADecider(baseURL string) *CADecider {
 	}
 }
 
+// caVerifyPath is the AH5 ConsumerAuthorization verify endpoint.
+const caVerifyPath = "/consumerauthorization/authorization/verify"
+
+// caTargetServiceDef is the AH5 targetType for a service definition.
+const caTargetServiceDef = "SERVICE_DEF"
+
+// caVerifyRequest mirrors the ConsumerAuthorization verify body (AH5 model).
 type caVerifyRequest struct {
-	ConsumerSystemName string `json:"consumerSystemName"`
-	ProviderSystemName string `json:"providerSystemName"`
-	ServiceDefinition  string `json:"serviceDefinition"`
+	Consumer   string `json:"consumer"`
+	Provider   string `json:"provider,omitempty"`
+	Target     string `json:"target"`
+	TargetType string `json:"targetType"`
 }
 
-type caVerifyResponse struct {
-	Authorized bool `json:"authorized"`
-}
-
-// Decide calls ConsumerAuthorization.verify(consumer, provider, service).
+// Decide calls ConsumerAuthorization verify(consumer, provider, target).
+// The response body is a plain JSON Boolean, not a wrapped object.
 // domainID and action are ignored — CA is a flat boolean grant store.
 func (c *CADecider) Decide(_, subject, service, provider, _ string) (bool, error) {
 	body := caVerifyRequest{
-		ConsumerSystemName: subject,
-		ProviderSystemName: provider,
-		ServiceDefinition:  service,
+		Consumer:   subject,
+		Provider:   provider,
+		Target:     service,
+		TargetType: caTargetServiceDef,
 	}
 	data, _ := json.Marshal(body)
-	resp, err := c.http.Post(c.baseURL+"/consumerauth/verify", "application/json", bytes.NewReader(data))
+	resp, err := c.http.Post(c.baseURL+caVerifyPath, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return false, fmt.Errorf("consumerauth verify: %w", err)
 	}
@@ -218,11 +227,11 @@ func (c *CADecider) Decide(_, subject, service, provider, _ string) (bool, error
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("consumerauth verify returned %d", resp.StatusCode)
 	}
-	var result caVerifyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var authorized bool
+	if err := json.NewDecoder(resp.Body).Decode(&authorized); err != nil {
 		return false, fmt.Errorf("consumerauth decode: %w", err)
 	}
-	return result.Authorized, nil
+	return authorized, nil
 }
 
 // --- ServiceRegistry HTTP client ---
@@ -241,63 +250,129 @@ func NewSRClient(baseURL string) RegistryQuerier {
 	}
 }
 
-// internal SR wire types
-type srQueryRequest struct {
-	ServiceDefinition string            `json:"serviceDefinition,omitempty"`
-	Interfaces        []string          `json:"interfaces,omitempty"`
-	Metadata          map[string]string `json:"metadata,omitempty"`
+// srLookupPath is the AH5 ServiceRegistry service-discovery lookup endpoint.
+const srLookupPath = "/serviceregistry/service-discovery/lookup"
+
+// AH5 interface property names that carry a provider's access details.
+const (
+	propAccessAddresses = "accessAddresses"
+	propAccessPort      = "accessPort"
+	propBasePath        = "basePath"
+)
+
+// srLookupRequest is the body for POST /serviceregistry/service-discovery/lookup.
+type srLookupRequest struct {
+	ServiceDefinitionNames []string `json:"serviceDefinitionNames"`
+	InterfaceTemplateNames []string `json:"interfaceTemplateNames,omitempty"`
+}
+
+type srAddress struct {
+	Type    string `json:"type"`
+	Address string `json:"address"`
 }
 
 type srSystem struct {
-	SystemName string `json:"systemName"`
-	Address    string `json:"address"`
-	Port       int    `json:"port"`
+	Name      string      `json:"name"`
+	Addresses []srAddress `json:"addresses,omitempty"`
 }
 
+type srInterface struct {
+	TemplateName string            `json:"templateName"`
+	Properties   map[string]string `json:"properties,omitempty"`
+}
+
+// srServiceInstance mirrors the AH5 service instance in a lookup response.
 type srServiceInstance struct {
-	ServiceDefinition string            `json:"serviceDefinition"`
-	ProviderSystem    srSystem          `json:"providerSystem"`
-	ServiceUri        string            `json:"serviceUri"`
-	Interfaces        []string          `json:"interfaces"`
-	Version           int               `json:"version"`
-	Metadata          map[string]string `json:"metadata,omitempty"`
+	Provider              *srSystem         `json:"provider,omitempty"`
+	ServiceDefinitionName string            `json:"serviceDefinitionName"`
+	Version               string            `json:"version,omitempty"`
+	Metadata              map[string]string `json:"metadata,omitempty"`
+	Interfaces            []srInterface     `json:"interfaces,omitempty"`
 }
 
-type srQueryResponse struct {
-	ServiceQueryData []srServiceInstance `json:"serviceQueryData"`
-	UnfilteredHits   int                 `json:"unfilteredHits"`
+type srLookupResponse struct {
+	Entries []srServiceInstance `json:"entries"`
+	Count   int                 `json:"count"`
 }
 
+// QuerySR looks up providers of filter.ServiceDefinition in the AH5
+// service-discovery store and maps each entry as specified in SPEC.md
+// ("ServiceRegistry lookup"). The metadata filter is applied here.
 func (c *srClient) QuerySR(filter ServiceFilter) ([]ServiceInstance, error) {
-	body := srQueryRequest{
-		ServiceDefinition: filter.ServiceDefinition,
-		Interfaces:        filter.Interfaces,
-		Metadata:          filter.Metadata,
+	body := srLookupRequest{
+		ServiceDefinitionNames: []string{filter.ServiceDefinition},
+		InterfaceTemplateNames: filter.Interfaces,
 	}
 	data, _ := json.Marshal(body)
-	resp, err := c.http.Post(c.baseURL+"/serviceregistry/query", "application/json", bytes.NewReader(data))
+	resp, err := c.http.Post(c.baseURL+srLookupPath, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var result srQueryResponse
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("service-discovery lookup returned %d", resp.StatusCode)
+	}
+	var result srLookupResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	instances := make([]ServiceInstance, 0, len(result.ServiceQueryData))
-	for _, svc := range result.ServiceQueryData {
-		instances = append(instances, ServiceInstance{
-			ServiceDefinition: svc.ServiceDefinition,
-			Provider: System{
-				SystemName: svc.ProviderSystem.SystemName,
-				Address:    svc.ProviderSystem.Address,
-				Port:       svc.ProviderSystem.Port,
-			},
-			ServiceUri: svc.ServiceUri,
-			Interfaces: svc.Interfaces,
-			Version:    svc.Version,
-			Metadata:   svc.Metadata,
-		})
+	instances := make([]ServiceInstance, 0, len(result.Entries))
+	for _, e := range result.Entries {
+		if !metadataContains(e.Metadata, filter.Metadata) {
+			continue
+		}
+		inst := ServiceInstance{
+			ServiceDefinition: e.ServiceDefinitionName,
+			ServiceUri:        firstProperty(e.Interfaces, propBasePath),
+			Interfaces:        make([]string, 0, len(e.Interfaces)),
+			Version:           leadingInt(e.Version),
+			Metadata:          e.Metadata,
+		}
+		for _, ifc := range e.Interfaces {
+			inst.Interfaces = append(inst.Interfaces, ifc.TemplateName)
+		}
+		if e.Provider != nil {
+			inst.Provider.SystemName = e.Provider.Name
+			if len(e.Provider.Addresses) > 0 {
+				inst.Provider.Address = e.Provider.Addresses[0].Address
+			}
+		}
+		if addrs := firstProperty(e.Interfaces, propAccessAddresses); addrs != "" {
+			first, _, _ := strings.Cut(addrs, ",")
+			inst.Provider.Address = strings.TrimSpace(first)
+		}
+		inst.Provider.Port, _ = strconv.Atoi(strings.TrimSpace(firstProperty(e.Interfaces, propAccessPort)))
+		instances = append(instances, inst)
 	}
 	return instances, nil
+}
+
+// firstProperty returns the named property of the first interface that has it.
+func firstProperty(ifaces []srInterface, name string) string {
+	for _, ifc := range ifaces {
+		if v, ok := ifc.Properties[name]; ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// metadataContains reports whether have holds every key of want with an equal value.
+func metadataContains(have, want map[string]string) bool {
+	for k, v := range want {
+		if hv, ok := have[k]; !ok || hv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// leadingInt returns the leading decimal integer of s ("2.1.0" → 2), or 0.
+func leadingInt(s string) int {
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	n, _ := strconv.Atoi(s[:end])
+	return n
 }

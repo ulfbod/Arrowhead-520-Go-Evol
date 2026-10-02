@@ -7,22 +7,25 @@ import "arrowhead/foundation/internal/model"
 
 // AH5StoreInterface is the storage contract for AH5 ServiceRegistry.
 type AH5StoreInterface interface {
+	// Save* upsert by natural key. The bool is true only when the entity did not
+	// exist before the call (201 vs 200 in the API). In Save*, Update* and Delete*
+	// a non-nil error reports a failed write; the bool is then meaningless.
 	// Devices
-	SaveDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool)
+	SaveDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool, error)
 	GetDevice(name string) *model.Device
 	AllDevices() []*model.Device
-	DeleteDevice(name string) bool
+	DeleteDevice(name string) (bool, error)
 	CreateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool)
-	UpdateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool)
+	UpdateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool, error)
 	HasDependentSystems(deviceName string) bool
 
 	// Systems
-	SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool)
+	SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool, error)
 	GetSystem(name string) *model.AH5System
 	AllSystems() []*model.AH5System
-	DeleteSystem(name string) bool
+	DeleteSystem(name string) (bool, error)
 	CreateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool)
-	UpdateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool)
+	UpdateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool, error)
 
 	// ServiceDefinitions
 	SaveServiceDefinitions(names []string) []*model.ServiceDefinition
@@ -38,10 +41,10 @@ type AH5StoreInterface interface {
 	DeleteInterfaceTemplates(names []string)
 
 	// ServiceInstances
-	SaveServiceInstance(req *model.ServiceRegistrationRequest) (*model.AH5ServiceInstance, bool)
+	SaveServiceInstance(req *model.ServiceRegistrationRequest) (*model.AH5ServiceInstance, bool, error)
 	CreateServiceInstance(req *model.ServiceCreateRequest) (*model.AH5ServiceInstance, bool)
-	UpdateServiceInstance(req *model.ServiceUpdateRequest) (*model.AH5ServiceInstance, bool)
+	UpdateServiceInstance(req *model.ServiceUpdateRequest) (*model.AH5ServiceInstance, bool, error)
 	AllServiceInstances() []*model.AH5ServiceInstance
-	DeleteServiceInstance(id string) bool
+	DeleteServiceInstance(id string) (bool, error)
 	DeleteServiceInstances(ids []string)
 }

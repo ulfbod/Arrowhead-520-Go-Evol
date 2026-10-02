@@ -25,3 +25,29 @@ func TestSQLiteIdentitySaveAndGet(t *testing.T) {
 		t.Error("Sysop = false, want true")
 	}
 }
+
+// TestSQLiteIdentitySave_ClosedDB_ReturnsError: a failed identity write is
+// reported, not answered as created.
+func TestSQLiteIdentitySave_ClosedDB_ReturnsError(t *testing.T) {
+	repo, err := repository.NewSQLiteIdentityRepository(t.TempDir() + "/closed.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteIdentityRepository: %v", err)
+	}
+	repo.Close()
+	if err := repo.Save(repository.Identity{SystemName: "Sys1", PasswordHash: "h"}); err == nil {
+		t.Error("expected an error on a closed database")
+	}
+}
+
+// TestSQLiteIdentityDelete_ClosedDB_ReturnsError: a failed delete is reported,
+// so the API cannot answer success while the identity can still log in.
+func TestSQLiteIdentityDelete_ClosedDB_ReturnsError(t *testing.T) {
+	repo, err := repository.NewSQLiteIdentityRepository(t.TempDir() + "/closed.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteIdentityRepository: %v", err)
+	}
+	repo.Close()
+	if err := repo.Delete("Sys1"); err == nil {
+		t.Error("expected an error on a closed database")
+	}
+}

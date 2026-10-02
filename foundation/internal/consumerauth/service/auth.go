@@ -33,6 +33,8 @@ var (
 	ErrDuplicateRule        = errors.New("authorization policy already exists")
 	ErrUnsupportedVariant   = errors.New("unsupported token variant")
 	ErrTokenNotFound        = errors.New("authorization token not found")
+	// ErrStorage wraps a failed write in the policy store (500 in the API).
+	ErrStorage = errors.New("storage error")
 )
 
 type authTokenRecord struct {
@@ -276,7 +278,11 @@ func (s *AuthService) Grant(req model.GrantRequest) (model.AuthPolicy, error) {
 		CreatedBy:      req.CreatedBy,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
-	return s.repo.Save(policy), nil
+	saved, err := s.repo.Save(policy)
+	if err != nil {
+		return model.AuthPolicy{}, fmt.Errorf("%w: %v", ErrStorage, err)
+	}
+	return saved, nil
 }
 
 // Revoke removes an authorization policy by instanceId.

@@ -31,7 +31,12 @@ var (
 	ErrInterfaceTemplateNotFound    = errors.New("interface template not found")
 	ErrServiceInstanceExists        = errors.New("service instance already exists")
 	ErrServiceInstanceNotFound      = errors.New("service instance not found")
+	// ErrStorage wraps a failed write in the backing store (500 in the API).
+	ErrStorage = errors.New("storage error")
 )
+
+// storageErr wraps a store write failure so the API can answer 500.
+func storageErr(err error) error { return fmt.Errorf("%w: %v", ErrStorage, err) }
 
 // AH5RegistryService implements the AH5 discovery and management business logic.
 type AH5RegistryService struct {
@@ -51,7 +56,10 @@ func (s *AH5RegistryService) RegisterDevice(req model.DeviceRegistrationRequest)
 	if strings.TrimSpace(req.Name) == "" {
 		return nil, false, ErrMissingDeviceName
 	}
-	d, created := s.store.SaveDevice(&req)
+	d, created, err := s.store.SaveDevice(&req)
+	if err != nil {
+		return nil, false, storageErr(err)
+	}
 	return d, created, nil
 }
 
@@ -92,7 +100,11 @@ func (s *AH5RegistryService) RevokeDevice(name string) (bool, error) {
 	if s.store.HasDependentSystems(name) {
 		return false, ErrLocked
 	}
-	return s.store.DeleteDevice(name), nil
+	ok, err := s.store.DeleteDevice(name)
+	if err != nil {
+		return false, storageErr(err)
+	}
+	return ok, nil
 }
 
 // ─── System Discovery ─────────────────────────────────────────────────────────
@@ -103,7 +115,10 @@ func (s *AH5RegistryService) RegisterSystem(req model.SystemRegistrationRequest)
 		return nil, false, ErrAH5SystemNameRequired
 	}
 	req.Version = normaliseVersion(req.Version)
-	sys, created := s.store.SaveSystem(&req)
+	sys, created, err := s.store.SaveSystem(&req)
+	if err != nil {
+		return nil, false, storageErr(err)
+	}
 	return sys, created, nil
 }
 
@@ -153,9 +168,14 @@ func (s *AH5RegistryService) LookupSystems(req model.SystemLookupRequest) model.
 	return model.SystemLookupResponse{Entries: matched, Count: len(matched)}
 }
 
-// RevokeSystem removes the named system. Returns false if not found.
-func (s *AH5RegistryService) RevokeSystem(name string) bool {
-	return s.store.DeleteSystem(name)
+// RevokeSystem removes the named system. Returns false if not found, and an
+// ErrStorage-wrapped error if the write fails.
+func (s *AH5RegistryService) RevokeSystem(name string) (bool, error) {
+	ok, err := s.store.DeleteSystem(name)
+	if err != nil {
+		return false, storageErr(err)
+	}
+	return ok, nil
 }
 
 // ─── Service Discovery ────────────────────────────────────────────────────────
@@ -169,7 +189,10 @@ func (s *AH5RegistryService) RegisterService(req model.ServiceRegistrationReques
 		return nil, false, ErrMissingServiceDefinitionName
 	}
 	req.Version = normaliseVersion(req.Version)
-	inst, created := s.store.SaveServiceInstance(&req)
+	inst, created, err := s.store.SaveServiceInstance(&req)
+	if err != nil {
+		return nil, false, storageErr(err)
+	}
 	return inst, created, nil
 }
 
@@ -239,9 +262,14 @@ func (s *AH5RegistryService) LookupServices(req model.ServiceLookupRequest) mode
 	return model.ServiceLookupResponse{Entries: matched, Count: len(matched)}
 }
 
-// RevokeService removes the service instance with the given ID.
-func (s *AH5RegistryService) RevokeService(instanceID string) bool {
-	return s.store.DeleteServiceInstance(instanceID)
+// RevokeService removes the service instance with the given ID. Returns false
+// if not found, and an ErrStorage-wrapped error if the write fails.
+func (s *AH5RegistryService) RevokeService(instanceID string) (bool, error) {
+	ok, err := s.store.DeleteServiceInstance(instanceID)
+	if err != nil {
+		return false, storageErr(err)
+	}
+	return ok, nil
 }
 
 // ─── Management — Devices ─────────────────────────────────────────────────────
@@ -275,7 +303,10 @@ func (s *AH5RegistryService) CreateDevices(req model.DeviceListRequest) (model.D
 func (s *AH5RegistryService) UpdateDevices(req model.DeviceListRequest) (model.DeviceListResponse, error) {
 	var result []*model.Device
 	for _, d := range req.Devices {
-		updated, ok := s.store.UpdateDevice(d)
+		updated, ok, err := s.store.UpdateDevice(d)
+		if err != nil {
+			return model.DeviceListResponse{}, storageErr(err)
+		}
 		if !ok {
 			return model.DeviceListResponse{}, ErrDeviceNotFound
 		}
@@ -287,11 +318,15 @@ func (s *AH5RegistryService) UpdateDevices(req model.DeviceListRequest) (model.D
 	return model.DeviceListResponse{Devices: result, Count: len(result)}, nil
 }
 
-// RemoveDevices removes the named devices (silent if not found).
-func (s *AH5RegistryService) RemoveDevices(names []string) {
+// RemoveDevices removes the named devices (silent if not found). A failed
+// write stops the loop and returns an ErrStorage-wrapped error.
+func (s *AH5RegistryService) RemoveDevices(names []string) error {
 	for _, name := range names {
-		s.store.DeleteDevice(name)
+		if _, err := s.store.DeleteDevice(name); err != nil {
+			return storageErr(err)
+		}
 	}
+	return nil
 }
 
 // ─── Management — Systems ─────────────────────────────────────────────────────
@@ -325,7 +360,10 @@ func (s *AH5RegistryService) CreateSystems(req model.SystemListRequest) (model.S
 func (s *AH5RegistryService) UpdateSystems(req model.SystemListRequest) (model.SystemListResponse, error) {
 	var result []*model.AH5System
 	for _, sys := range req.Systems {
-		updated, ok := s.store.UpdateSystem(sys)
+		updated, ok, err := s.store.UpdateSystem(sys)
+		if err != nil {
+			return model.SystemListResponse{}, storageErr(err)
+		}
 		if !ok {
 			return model.SystemListResponse{}, ErrSystemNotFound
 		}
@@ -337,11 +375,15 @@ func (s *AH5RegistryService) UpdateSystems(req model.SystemListRequest) (model.S
 	return model.SystemListResponse{Systems: result, Count: len(result)}, nil
 }
 
-// RemoveSystems removes the named systems (silent if not found).
-func (s *AH5RegistryService) RemoveSystems(names []string) {
+// RemoveSystems removes the named systems (silent if not found). A failed
+// write stops the loop and returns an ErrStorage-wrapped error.
+func (s *AH5RegistryService) RemoveSystems(names []string) error {
 	for _, name := range names {
-		s.store.DeleteSystem(name)
+		if _, err := s.store.DeleteSystem(name); err != nil {
+			return storageErr(err)
+		}
 	}
+	return nil
 }
 
 // ─── Management — Service Definitions ────────────────────────────────────────
@@ -460,7 +502,10 @@ func (s *AH5RegistryService) CreateServiceInstances(req model.ServiceCreateListR
 func (s *AH5RegistryService) UpdateServiceInstances(req model.ServiceUpdateListRequest) (model.ServiceListResponse, error) {
 	var result []*model.AH5ServiceInstance
 	for _, r := range req.Instances {
-		inst, ok := s.store.UpdateServiceInstance(r)
+		inst, ok, err := s.store.UpdateServiceInstance(r)
+		if err != nil {
+			return model.ServiceListResponse{}, storageErr(err)
+		}
 		if !ok {
 			return model.ServiceListResponse{}, ErrServiceInstanceNotFound
 		}

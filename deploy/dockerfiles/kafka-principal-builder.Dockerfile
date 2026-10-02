@@ -4,7 +4,7 @@
 # Stage 1: Maven build -- compiles Java sources, runs tests, assembles fat JAR.
 # Stage 2: cp-kafka image -- copies the plugin JAR to /opt/kafka-plugins/.
 #
-# Build context: repo root (Arrowhead-520-evol/)
+# Build context: repo root (Arrowhead-520-Go-Evol/)
 
 # -- Stage 1: Maven build -----------------------------------------------------
 FROM maven:3.9.6-eclipse-temurin-11 AS builder

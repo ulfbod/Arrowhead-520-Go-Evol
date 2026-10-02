@@ -4,7 +4,7 @@
 # which queries PIP to check cert validity. Revoked certs are rejected with an
 # AuthenticationException before any Kafka protocol interaction (D2' enforcement).
 #
-# Build context: repo root (Arrowhead-520-evol/)
+# Build context: repo root (Arrowhead-520-Go-Evol/)
 
 # -- Stage 1: Build the Java plugin -------------------------------------------
 FROM maven:3.9.6-eclipse-temurin-11 AS plugin-builder

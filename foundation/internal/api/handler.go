@@ -7,6 +7,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,7 +56,11 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	svc, err := h.svc.Register(req)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error(), "serviceregistry")
+		status := http.StatusBadRequest
+		if errors.Is(err, service.ErrStorage) {
+			status = http.StatusInternalServerError
+		}
+		httputil.WriteError(w, status, err.Error(), "serviceregistry")
 		return
 	}
 	httputil.WriteJSON(w, http.StatusCreated, svc, "serviceregistry")

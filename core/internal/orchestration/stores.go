@@ -110,7 +110,7 @@ func (s *lockStore) removeByOwner(owner string) int {
 // HistoryEntry records a single orchestration job.
 type HistoryEntry struct {
 	ID                string     `json:"id"`
-	Status            string     `json:"status"`  // DONE | ERROR | PENDING
+	Status            string     `json:"status"`  // PULL: DONE | ERROR; PUSH: PENDING | DELIVERED | FAILED
 	Type              string     `json:"type"`    // PULL | PUSH
 	RequesterSystem   string     `json:"requesterSystem,omitempty"`
 	ServiceDefinition string     `json:"serviceDefinition,omitempty"`

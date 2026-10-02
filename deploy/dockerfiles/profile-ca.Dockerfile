@@ -1,5 +1,5 @@
 # Builds the profile-ca service (CA-as-PIP).
-# Build context: repo root (Arrowhead-520-evol/)
+# Build context: repo root (Arrowhead-520-Go-Evol/)
 
 FROM golang:1.25-alpine AS builder
 ENV GOTOOLCHAIN=auto

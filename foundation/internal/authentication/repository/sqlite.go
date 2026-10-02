@@ -32,13 +32,14 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 
 func (r *SQLiteRepository) Close() error { return r.db.Close() }
 
-func (r *SQLiteRepository) Save(t *model.IdentityToken) {
-	r.db.Exec(
+func (r *SQLiteRepository) Save(t *model.IdentityToken) error {
+	_, err := r.db.Exec(
 		`INSERT OR REPLACE INTO identity_tokens (token, system_name, expires_at, login_time) VALUES (?,?,?,?)`,
 		t.Token, t.SystemName,
 		t.ExpiresAt.UTC().Format(time.RFC3339),
 		t.LoginTime.UTC().Format(time.RFC3339),
 	)
+	return err
 }
 
 func (r *SQLiteRepository) FindByToken(token string) (*model.IdentityToken, bool) {
@@ -79,8 +80,9 @@ func (r *SQLiteRepository) Delete(token string) bool {
 	return n > 0
 }
 
-func (r *SQLiteRepository) DeleteBySystemName(name string) {
-	r.db.Exec(`DELETE FROM identity_tokens WHERE system_name=?`, name)
+func (r *SQLiteRepository) DeleteBySystemName(name string) error {
+	_, err := r.db.Exec(`DELETE FROM identity_tokens WHERE system_name=?`, name)
+	return err
 }
 
 func (r *SQLiteRepository) All() []*model.IdentityToken {

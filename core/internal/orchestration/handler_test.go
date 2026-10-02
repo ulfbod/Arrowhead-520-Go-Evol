@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubOrchestrator wraps a fixed response for handler tests.
@@ -161,22 +162,50 @@ func TestHealthEndpoints(t *testing.T) {
 
 // ---- Status (backward compat) -----------------------------------------------
 
-func TestStatusHandler_Returns200(t *testing.T) {
+// SPEC.md "GET /status": {"status":"ok","authBackend":"grpc","enableAuth":true}.
+func TestStatusHandler_SpecShape(t *testing.T) {
+	for _, tc := range []struct {
+		backend string
+		enabled bool
+	}{{"grpc", true}, {"consumerauth", false}} {
+		mux := http.NewServeMux()
+		RegisterRoutes(mux, &stubOrchestrator{}, tc.backend, tc.enabled, "")
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("status: got %d want 200", w.Code)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		want := map[string]interface{}{"status": "ok", "authBackend": tc.backend, "enableAuth": tc.enabled}
+		if len(body) != len(want) {
+			t.Errorf("keys: got %v, want exactly %v", body, want)
+		}
+		for k, v := range want {
+			if body[k] != v {
+				t.Errorf("%s: got %v want %v", k, body[k], v)
+			}
+		}
+	}
+}
+
+// SPEC.md "GET /health": {"status":"ok"}.
+func TestHealthHandler_SpecShape(t *testing.T) {
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, &stubOrchestrator{}, "test-domain", true, "")
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	RegisterRoutes(mux, &stubOrchestrator{}, "grpc", true, "")
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("status: got %d want 200", w.Code)
+		t.Fatalf("status: got %d want 200", w.Code)
 	}
-	var body map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body["status"] != "UP" {
-		t.Errorf("status field: got %v", body["status"])
+	if got := strings.TrimSpace(w.Body.String()); got != `{"status":"ok"}` {
+		t.Errorf("body: got %s", got)
 	}
 }
 
@@ -330,8 +359,25 @@ func TestPushMgmtSubscribeAndQuery(t *testing.T) {
 }
 
 func TestTriggerCreatesPendingHistory(t *testing.T) {
+	// The subscriber holds the delivery open until the history has been read,
+	// so the entry is still PENDING. (Without a notifyInterface the delivery
+	// goroutine marks FAILED at once and races the query.)
+	release := make(chan struct{})
+	subscriber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer subscriber.Close()
+	defer close(release)
+
 	h := NewHandler(&stubOrchestrator{}, "")
-	sw := postJSON(t, h, "/serviceorchestration/orchestration/subscribe", validSubscribeBody)
+	body := map[string]any{
+		"ownerSystemName":      "consumer-app",
+		"targetSystemName":     "consumer-app",
+		"orchestrationRequest": validSubscribeBody["orchestrationRequest"],
+		"notifyInterface":      map[string]any{"notifyUri": subscriber.URL + "/notify"},
+	}
+	sw := postJSON(t, h, "/serviceorchestration/orchestration/subscribe", body)
 	var sub struct{ ID string `json:"id"` }
 	json.NewDecoder(sw.Body).Decode(&sub)
 
@@ -361,5 +407,200 @@ func TestTriggerNotFoundReturns404(t *testing.T) {
 		map[string]any{"subscriptionId": "no-such-id"})
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// ---- Subscribe response and push delivery (SPEC.md "subscribe", "push/trigger") ----
+
+// TestSubscribeReturnsFullSubscription pins the subscribe response: the whole
+// stored subscription, not only its id.
+func TestSubscribeReturnsFullSubscription(t *testing.T) {
+	h := NewHandler(&stubOrchestrator{}, "")
+	body := map[string]any{
+		"ownerSystemName":  "ConsumerApp",
+		"targetSystemName": "ConsumerApp",
+		"orchestrationRequest": map[string]any{
+			"requesterSystem":  map[string]any{"systemName": "ConsumerApp"},
+			"requestedService": map[string]any{"serviceDefinition": "telemetry"},
+		},
+		"notifyInterface": map[string]any{"notifyUri": "http://consumer:8080/notify"},
+		"expiredAt":       "2027-01-01T00:00:00Z",
+	}
+	w := postJSON(t, h, "/serviceorchestration/orchestration/subscribe", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, k := range []string{"id", "ownerSystemName", "targetSystemName", "orchestrationRequest", "notifyInterface", "expiredAt", "createdAt"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("response lacks %q: %v", k, got)
+		}
+	}
+	if len(got) != 7 {
+		t.Errorf("keys: got %d (%v), want 7", len(got), got)
+	}
+	if got["ownerSystemName"] != "ConsumerApp" || got["expiredAt"] != "2027-01-01T00:00:00Z" {
+		t.Errorf("echoed fields: got %v", got)
+	}
+}
+
+// historyStatus polls mgmt/history/query until a PUSH entry leaves PENDING.
+func historyStatus(t *testing.T, h http.Handler) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		hw := postJSON(t, h, "/serviceorchestration/orchestration/mgmt/history/query", map[string]any{})
+		var hist HistoryQueryResponse
+		json.NewDecoder(hw.Body).Decode(&hist)
+		for _, e := range hist.Entries {
+			if e.Type == "PUSH" && e.Status != "PENDING" {
+				return e.Status
+			}
+		}
+		if time.Now().After(deadline) {
+			return "PENDING"
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestTriggerDeliversRealPost verifies that a trigger POSTs to notifyInterface,
+// that the notification carries only the subscription identity (no provider
+// list), and that the history entry becomes DELIVERED.
+func TestTriggerDeliversRealPost(t *testing.T) {
+	received := make(chan map[string]any, 1)
+	subscriber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var n map[string]any
+		json.NewDecoder(r.Body).Decode(&n)
+		if r.Method == http.MethodPost && r.URL.Path == "/notify" {
+			received <- n
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer subscriber.Close()
+
+	h := NewHandler(&stubOrchestrator{}, "")
+	body := map[string]any{
+		"ownerSystemName":      "ConsumerApp",
+		"targetSystemName":     "ConsumerApp",
+		"orchestrationRequest": validSubscribeBody["orchestrationRequest"],
+		"notifyInterface":      map[string]any{"notifyUri": subscriber.URL + "/notify"},
+	}
+	sw := postJSON(t, h, "/serviceorchestration/orchestration/subscribe", body)
+	var sub struct{ ID string `json:"id"` }
+	json.NewDecoder(sw.Body).Decode(&sub)
+
+	tw := postJSON(t, h, "/serviceorchestration/orchestration/mgmt/push/trigger", map[string]any{"subscriptionId": sub.ID})
+	if tw.Code != http.StatusOK || !strings.Contains(tw.Body.String(), `"triggered"`) {
+		t.Fatalf("trigger: got %d %s", tw.Code, tw.Body.String())
+	}
+
+	select {
+	case n := <-received:
+		want := map[string]any{"subscriptionId": sub.ID, "ownerSystemName": "ConsumerApp", "targetSystemName": "ConsumerApp"}
+		if len(n) != len(want) {
+			t.Errorf("notification keys: got %v, want exactly %v", n, want)
+		}
+		for k, v := range want {
+			if n[k] != v {
+				t.Errorf("notification[%q]: got %v want %v", k, n[k], v)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber received no POST")
+	}
+	if got := historyStatus(t, h); got != "DELIVERED" {
+		t.Errorf("history status: got %s want DELIVERED", got)
+	}
+}
+
+// TestTriggerNon2xxMarksFailed verifies that a subscriber error marks FAILED.
+func TestTriggerNon2xxMarksFailed(t *testing.T) {
+	subscriber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer subscriber.Close()
+
+	h := NewHandler(&stubOrchestrator{}, "")
+	body := map[string]any{
+		"ownerSystemName":      "ConsumerApp",
+		"targetSystemName":     "ConsumerApp",
+		"orchestrationRequest": validSubscribeBody["orchestrationRequest"],
+		"notifyInterface":      map[string]any{"notifyUri": subscriber.URL + "/notify"},
+	}
+	sw := postJSON(t, h, "/serviceorchestration/orchestration/subscribe", body)
+	var sub struct{ ID string `json:"id"` }
+	json.NewDecoder(sw.Body).Decode(&sub)
+	postJSON(t, h, "/serviceorchestration/orchestration/mgmt/push/trigger", map[string]any{"subscriptionId": sub.ID})
+
+	if got := historyStatus(t, h); got != "FAILED" {
+		t.Errorf("history status: got %s want FAILED", got)
+	}
+}
+
+// ---- Management access (SPEC.md "Management access") ------------------------
+
+// TestMgmtAuth_Cases drives requireMgmtAuth through mgmt/history/query with an
+// Authentication stub. An unknown token gets 200 {"verified":false,"sysop":false},
+// as from the real Authentication system.
+func TestMgmtAuth_Cases(t *testing.T) {
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.URL.Path, "/authentication/identity/verify/")
+		w.Header().Set("Content-Type", "application/json")
+		switch token {
+		case "sysop-token":
+			w.Write([]byte(`{"verified":true,"systemName":"SysopSystem","sysop":true}`)) //nolint:errcheck
+		case "user-token":
+			w.Write([]byte(`{"verified":true,"systemName":"UserSystem","sysop":false}`)) //nolint:errcheck
+		case "broken-token":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "garbage-token":
+			w.Write([]byte(`not json`)) //nolint:errcheck
+		default:
+			w.Write([]byte(`{"verified":false,"sysop":false}`)) //nolint:errcheck
+		}
+	}))
+	defer auth.Close()
+
+	cases := []struct {
+		name, authURL, token string
+		wantStatus           int
+		wantType             string
+	}{
+		{"open mode", "", "", http.StatusOK, ""},
+		{"no token", auth.URL, "", http.StatusUnauthorized, "AUTH_EXCEPTION"},
+		{"auth unreachable", "http://127.0.0.1:1", "sysop-token", http.StatusUnauthorized, "AUTH_EXCEPTION"},
+		{"auth non-200", auth.URL, "broken-token", http.StatusUnauthorized, "AUTH_EXCEPTION"},
+		{"undecodable answer", auth.URL, "garbage-token", http.StatusUnauthorized, "AUTH_EXCEPTION"},
+		{"verified false", auth.URL, "bogus", http.StatusUnauthorized, "AUTH_EXCEPTION"},
+		{"verified, not sysop", auth.URL, "user-token", http.StatusForbidden, "FORBIDDEN"},
+		{"verified sysop", auth.URL, "sysop-token", http.StatusOK, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler(&stubOrchestrator{}, tc.authURL)
+			req := httptest.NewRequest(http.MethodPost, "/serviceorchestration/orchestration/mgmt/history/query", strings.NewReader("{}"))
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status: got %d want %d; body %s", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if tc.wantType == "" {
+				return
+			}
+			var body map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body["exceptionType"] != tc.wantType || body["origin"] != "dynamicorch-xacml" {
+				t.Errorf("envelope: got %v", body)
+			}
+		})
 	}
 }

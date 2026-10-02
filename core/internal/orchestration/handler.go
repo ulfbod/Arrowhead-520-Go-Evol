@@ -25,7 +25,9 @@ type handler struct {
 }
 
 // requireMgmtAuth checks sysop Bearer token when mgmtAuthURL is set.
-// Returns true if the request is allowed to proceed.
+// Returns true if the request is allowed to proceed. Missing token, Authentication
+// unreachable or non-200, and "verified": false → 401; verified non-sysop → 403
+// (SPEC.md "Management access").
 func (h *handler) requireMgmtAuth(w http.ResponseWriter, r *http.Request) bool {
 	if h.mgmtAuthURL == "" {
 		return true
@@ -60,9 +62,21 @@ func (h *handler) requireMgmtAuth(w http.ResponseWriter, r *http.Request) bool {
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	var body struct {
-		Sysop bool `json:"sysop"`
+		Verified bool `json:"verified"`
+		Sysop    bool `json:"sysop"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || !body.Sysop {
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || !body.Verified {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"errorMessage":  "management access denied: token invalid or expired",
+			"errorCode":     http.StatusUnauthorized,
+			"exceptionType": "AUTH_EXCEPTION",
+			"origin":        "dynamicorch-xacml",
+		})
+		return false
+	}
+	if !body.Sysop {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -125,7 +139,7 @@ func NewHandler(orch Orchestrator, mgmtAuthURL string) http.Handler {
 
 func (h *handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "UP"}) //nolint:errcheck
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
 }
 
 func (h *handler) handleOrchestrate(w http.ResponseWriter, r *http.Request) {
@@ -336,17 +350,18 @@ func (h *handler) handleHistoryQuery(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
-// RegisterRoutes wires all routes onto mux (backward compat — also adds /status).
+// RegisterRoutes wires all routes onto mux, including GET /status.
+// authBackend and enabled are reported by /status (SPEC.md: "GET /status").
 // mgmtAuthURL is passed to NewHandler for sysop management access control.
-func RegisterRoutes(mux *http.ServeMux, orch Orchestrator, domainID string, enabled bool, mgmtAuthURL string) {
+func RegisterRoutes(mux *http.ServeMux, orch Orchestrator, authBackend string, enabled bool, mgmtAuthURL string) {
 	mux.Handle("/serviceorchestration/", NewHandler(orch, mgmtAuthURL))
 	mux.Handle("/health", NewHandler(orch, mgmtAuthURL))
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-			"status":   "UP",
-			"domainID": domainID,
-			"xacml":    enabled,
+			"status":      "ok",
+			"authBackend": authBackend,
+			"enableAuth":  enabled,
 		})
 	})
 }

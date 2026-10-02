@@ -737,3 +737,86 @@ func TestAuthMgmtIdentitiesCreateBatchAtomicRejection(t *testing.T) {
 		t.Errorf("batch atomic rejection: expected %d identities (baseline) after failed batch, got %d", baseline, len(afterResp.Identities))
 	}
 }
+
+// ─── Management deletes report storage failures ──────────────────────────────
+
+// sqliteAuthService builds a service on real SQLite stores; closeTokens and
+// closeIdentities close one store to make its writes fail.
+func sqliteAuthService(t *testing.T, closeTokens, closeIdentities bool) *service.AuthService {
+	t.Helper()
+	dir := t.TempDir()
+	tokens, err := repository.NewSQLiteRepository(dir + "/tokens.db")
+	if err != nil {
+		t.Fatalf("token store: %v", err)
+	}
+	ids, err := repository.NewSQLiteIdentityRepository(dir + "/ids.db")
+	if err != nil {
+		t.Fatalf("identity store: %v", err)
+	}
+	t.Cleanup(func() { tokens.Close(); ids.Close() })
+	if closeTokens {
+		tokens.Close()
+	}
+	if closeIdentities {
+		ids.Close()
+	}
+	return service.NewAuthServiceFull(tokens, ids, time.Hour)
+}
+
+func deleteStatus(t *testing.T, h http.Handler, path string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Code, w.Body.String()
+}
+
+func TestMgmtIdentitiesDelete_SuccessAndStorageError(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc := sqliteAuthService(t, false, false)
+		if _, err := svc.CreateIdentities([]service.CreateIdentityRequest{{SystemName: "Gone1", Credentials: map[string]string{"password": "pw"}}}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		h := api.NewHandler(svc, "")
+		if code, body := deleteStatus(t, h, "/authentication/mgmt/identities?names=Gone1"); code != http.StatusOK {
+			t.Fatalf("delete: got %d want 200; %s", code, body)
+		}
+		if _, err := svc.Login(model.LoginRequest{SystemName: "Gone1", CredentialsMap: map[string]string{"password": "pw"}}); err == nil {
+			t.Error("login still succeeds after the identity was deleted")
+		}
+	})
+	t.Run("storage error", func(t *testing.T) {
+		h := api.NewHandler(sqliteAuthService(t, false, true), "")
+		code, body := deleteStatus(t, h, "/authentication/mgmt/identities?names=Gone1")
+		if code != http.StatusInternalServerError || !strings.Contains(body, `"errorCode":500`) {
+			t.Errorf("got %d %s, want 500 envelope", code, body)
+		}
+	})
+}
+
+func TestMgmtSessionsDelete_SuccessAndStorageError(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		svc := sqliteAuthService(t, false, false)
+		if _, err := svc.CreateIdentities([]service.CreateIdentityRequest{{SystemName: "Sess1", Credentials: map[string]string{"password": "pw"}}}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		login, err := svc.Login(model.LoginRequest{SystemName: "Sess1", CredentialsMap: map[string]string{"password": "pw"}})
+		if err != nil {
+			t.Fatalf("login: %v", err)
+		}
+		h := api.NewHandler(svc, "")
+		if code, body := deleteStatus(t, h, "/authentication/mgmt/sessions?names=Sess1"); code != http.StatusOK {
+			t.Fatalf("revoke: got %d want 200; %s", code, body)
+		}
+		if v, _ := svc.Verify(login.Token); v.Verified {
+			t.Error("token still verifies after its session was revoked")
+		}
+	})
+	t.Run("storage error", func(t *testing.T) {
+		h := api.NewHandler(sqliteAuthService(t, true, false), "")
+		code, body := deleteStatus(t, h, "/authentication/mgmt/sessions?names=Sess1")
+		if code != http.StatusInternalServerError || !strings.Contains(body, `"errorCode":500`) {
+			t.Errorf("got %d %s, want 500 envelope", code, body)
+		}
+	})
+}

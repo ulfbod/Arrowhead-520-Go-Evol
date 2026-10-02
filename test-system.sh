@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# test-system.sh — Tiered regression test suite for Arrowhead-520-evol.
+# test-system.sh — Tiered regression test suite for Arrowhead-520-Go-Evol.
 #
 # Usage:
 #   bash test-system.sh              # Full regression (levels 1-4, requires Docker stack)
-#   bash test-system.sh --smoke      # Levels 1-2 only (no Docker, fast)
+#   bash test-system.sh --smoke      # Levels 1-2 only (no Docker, about 50 s)
 #   bash test-system.sh --run REGEX  # Full regression, but filter integration tests by name
 #
 # Tiered execution (cheapest first — never skip a level):
@@ -12,6 +12,13 @@
 #   Level 3-4: Go integration test harness (tests/integration/, -tags=integration)
 #              Covers: preflight, cert issuance, PIP, revocation, PAP, orchestration,
 #              foundation services, external tools
+#
+# Not covered by this script: TestConsumerAuthMode needs the six-service subset
+# (AUTH_BACKEND=consumerauth) and is skipped on the full stack. Run it separately:
+#   docker compose -f deploy/docker-compose.consumerauth.yml up --build -d
+#   (cd tests/integration && go test -tags=integration -v -run TestConsumerAuthMode ./...)
+#   docker compose -f deploy/docker-compose.consumerauth.yml down -v
+# TestGrpcModePull is its counterpart on the full stack and is skipped on the subset.
 #
 # Prerequisites for levels 3-4:
 #   docker compose -f deploy/docker-compose.yml up --build -d
@@ -120,6 +127,8 @@ fi
 #   revocation_test.go    — full lifecycle (issue→valid→revoke→invalid→reissue→valid)
 #   pap_test.go           — policy CRUD
 #   orchestration_test.go — DynamicOrch status, pull, mgmt endpoints
+#   grpc_mode_test.go     — positive pull in grpc mode (AH5-registered provider, Permit policy)
+#   consumerauth_mode_test.go — consumerauth-mode pull (subset stack only; skipped here)
 #   foundation_test.go    — SR register+query, Auth, ConsumerAuth (TLS)
 #   external_test.go      — RabbitMQ Management, Kafdrop reachable
 # ═══════════════════════════════════════════════════════════════════════════════

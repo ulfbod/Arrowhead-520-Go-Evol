@@ -115,6 +115,8 @@ func NewAH5HandlerWithPolicy(svc *service.AH5RegistryService, authURL, mgmtAuthU
 // statusFor maps sentinel errors to HTTP status codes for this handler.
 func (h *AH5Handler) statusFor(err error) int {
 	switch {
+	case errors.Is(err, service.ErrStorage):
+		return http.StatusInternalServerError
 	case errors.Is(err, service.ErrLocked):
 		return http.StatusLocked
 	case errors.Is(err, service.ErrDeviceNotFound),
@@ -187,8 +189,8 @@ func (h *AH5Handler) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ok, err := h.svc.RevokeDevice(name)
-	if errors.Is(err, service.ErrLocked) {
-		httputil.WriteError(w, http.StatusLocked, err.Error(), srOrigin)
+	if err != nil {
+		httputil.WriteError(w, h.statusFor(err), err.Error(), srOrigin)
 		return
 	}
 	if ok {
@@ -264,7 +266,12 @@ func (h *AH5Handler) handleSystemRevoke(w http.ResponseWriter, r *http.Request) 
 		httputil.WriteError(w, http.StatusBadRequest, "name query parameter required", srOrigin)
 		return
 	}
-	if h.svc.RevokeSystem(name) {
+	ok, err := h.svc.RevokeSystem(name)
+	if err != nil {
+		httputil.WriteError(w, h.statusFor(err), err.Error(), srOrigin)
+		return
+	}
+	if ok {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusNoContent)
@@ -396,7 +403,12 @@ func (h *AH5Handler) handleServiceRevoke(w http.ResponseWriter, r *http.Request)
 		httputil.WriteError(w, http.StatusBadRequest, "instanceId required in path", srOrigin)
 		return
 	}
-	if h.svc.RevokeService(id) {
+	ok, err := h.svc.RevokeService(id)
+	if err != nil {
+		httputil.WriteError(w, h.statusFor(err), err.Error(), srOrigin)
+		return
+	}
+	if ok {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusNoContent)
@@ -461,7 +473,10 @@ func (h *AH5Handler) handleMgmtDevices(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, http.StatusOK, resp, srOrigin)
 	case http.MethodDelete:
 		names := r.URL.Query()["names"]
-		h.svc.RemoveDevices(names)
+		if err := h.svc.RemoveDevices(names); err != nil {
+			httputil.WriteError(w, h.statusFor(err), err.Error(), srOrigin)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "POST, PUT, or DELETE required", srOrigin)
@@ -526,7 +541,10 @@ func (h *AH5Handler) handleMgmtSystems(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, http.StatusOK, resp, srOrigin)
 	case http.MethodDelete:
 		names := r.URL.Query()["names"]
-		h.svc.RemoveSystems(names)
+		if err := h.svc.RemoveSystems(names); err != nil {
+			httputil.WriteError(w, h.statusFor(err), err.Error(), srOrigin)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "POST, PUT, or DELETE required", srOrigin)
@@ -568,11 +586,11 @@ func (h *AH5Handler) handleMgmtSystemsRevoke(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	if h.svc.RevokeSystem(systemName) {
-		w.WriteHeader(http.StatusNoContent)
-	} else {
-		w.WriteHeader(http.StatusNoContent)
+	if _, err := h.svc.RevokeSystem(systemName); err != nil {
+		httputil.WriteError(w, h.statusFor(err), err.Error(), srOrigin)
+		return
 	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // resolveSystemNameFromToken calls GET /authentication/identity/verify/<token>

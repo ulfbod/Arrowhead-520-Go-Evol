@@ -1,4 +1,4 @@
-# Arrowhead-520-evol
+# Arrowhead-520-Go-Evol
 
 Arrowhead 5.2 evolved authorization stack with gRPC-based XACML PDP,
 profile-based PKI, CA-as-PIP, and multi-transport policy enforcement.

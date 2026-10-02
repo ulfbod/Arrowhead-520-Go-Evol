@@ -72,7 +72,11 @@ func (s *RegistryService) Register(req model.RegisterRequest) (*model.ServiceIns
 		Metadata:          req.Metadata,
 		Secure:            req.Secure,
 	}
-	return s.repo.Save(svc), nil
+	saved, err := s.repo.Save(svc)
+	if err != nil {
+		return nil, storageErr(err)
+	}
+	return saved, nil
 }
 
 // Unregister removes a service instance identified by the natural key.

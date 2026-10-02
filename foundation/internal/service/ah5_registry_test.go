@@ -161,14 +161,14 @@ func TestSystemLookupByName(t *testing.T) {
 func TestSystemRevokeFound(t *testing.T) {
 	svc := newAH5Service()
 	svc.RegisterSystem(model.SystemRegistrationRequest{Name: "RemSys"}) //nolint
-	if !svc.RevokeSystem("RemSys") {
+	if ok, err := svc.RevokeSystem("RemSys"); err != nil || !ok {
 		t.Error("expected true")
 	}
 }
 
 func TestSystemRevokeNotFound(t *testing.T) {
 	svc := newAH5Service()
-	if svc.RevokeSystem("ghost") {
+	if ok, err := svc.RevokeSystem("ghost"); err != nil || ok {
 		t.Error("expected false")
 	}
 }
@@ -282,7 +282,7 @@ func TestServiceRevokeFound(t *testing.T) {
 		SystemName:            "P1",
 		ServiceDefinitionName: "s",
 	})
-	if !svc.RevokeService(inst.InstanceID) {
+	if ok, err := svc.RevokeService(inst.InstanceID); err != nil || !ok {
 		t.Error("expected true")
 	}
 	resp := svc.LookupServices(model.ServiceLookupRequest{})
@@ -293,7 +293,7 @@ func TestServiceRevokeFound(t *testing.T) {
 
 func TestServiceRevokeNotFound(t *testing.T) {
 	svc := newAH5Service()
-	if svc.RevokeService("nonexistent-id") {
+	if ok, err := svc.RevokeService("nonexistent-id"); err != nil || ok {
 		t.Error("expected false")
 	}
 }
@@ -451,8 +451,8 @@ func TestServiceRevokeByCompositeID(t *testing.T) {
 		SystemName: "Provider1", ServiceDefinitionName: "temperature", Version: "1.0.0",
 	}
 	inst, _, _ := svc.RegisterService(req)
-	ok := svc.RevokeService(inst.InstanceID)
-	if !ok {
+	ok, err := svc.RevokeService(inst.InstanceID)
+	if err != nil || !ok {
 		t.Error("expected RevokeService to return true for existing instance")
 	}
 	results := svc.LookupServices(model.ServiceLookupRequest{

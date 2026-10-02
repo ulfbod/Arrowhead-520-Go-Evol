@@ -66,10 +66,10 @@ Optional on ServiceRegistry System:
 Manages service provider registrations and discovery.
 
 **Configuration (env vars):**
-- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints require sysop Bearer token. When empty, management is open.
+- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints require sysop Bearer token. The token is checked with `GET <MGMT_AUTH_URL>/authentication/identity/verify/<token>`: missing token → 401; Authentication unreachable or non-200 → 401; `"verified": false` (unknown or expired token) → 401; verified but `"sysop": false` → 403. When empty, management is open.
 - `BLACKLIST_URL` — when set, `POST /serviceregistry/register` rejects registrations from blacklisted `providerSystem.systemName` (403 Forbidden). When empty, no blacklist check.
 - `SR_AUTH_URL` — Authentication system URL for system-remove token verification. Default: `http://localhost:8081`.
-- `REGISTER_AUTH_URL` — when set, `POST /serviceregistry/system-discovery/register` and `POST /serviceregistry/service-discovery/register` require `Authorization: Bearer <token>` whose verified `systemName` matches the `name`/`systemName` in the request body. Fail-closed: missing token → 401; network error → 401; name mismatch → 403. When empty, registration is open (development mode). Added in Step 33 (G10).
+- `REGISTER_AUTH_URL` — when set, `POST /serviceregistry/system-discovery/register` and `POST /serviceregistry/service-discovery/register` require `Authorization: Bearer <token>` whose verified `systemName` matches the `name`/`systemName` in the request body. Fail-closed: missing token → 401; network error or non-200 from Authentication → 401; `"verified": false` (unknown or expired token) → 401; verified token for another system (name mismatch) → 403. When empty, registration is open (development mode). Added in Step 33 (G10).
 
 ### Service Instance
 
@@ -122,7 +122,7 @@ The following endpoints implement the AH5 `serviceDiscovery`, `systemDiscovery`,
 `deviceDiscovery`, and `serviceRegistryManagement` interfaces.
 They are served on the same port (8080) as the legacy endpoints.
 
-All errors use the shared format: `{"error": "message"}`.
+All errors use the shared AH5 error format (see [Error Format](#error-format)).
 
 ---
 
@@ -529,7 +529,7 @@ Removes a registered service instance.
 Manages identity tokens for systems. Tokens are opaque strings with an expiry.
 
 **Configuration (env vars):**
-- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints (identities, sessions) require sysop Bearer token. When empty, management is open.
+- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints (identities, sessions) require sysop Bearer token. The token is checked with `GET <MGMT_AUTH_URL>/authentication/identity/verify/<token>`: missing token → 401; Authentication unreachable or non-200 → 401; `"verified": false` (unknown or expired token) → 401; verified but `"sysop": false` → 403. When empty, management is open.
 
 ### POST /authentication/identity/login
 
@@ -691,7 +691,7 @@ Manages provider-centric authorization policies. Each policy is identified by a 
 `instanceId` of the form `PR|LOCAL|<provider>|<targetType>|<target>`.
 
 **Configuration (env vars):**
-- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints require sysop Bearer token. When empty, management is open.
+- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints require sysop Bearer token. The token is checked with `GET <MGMT_AUTH_URL>/authentication/identity/verify/<token>`: missing token → 401; Authentication unreachable or non-200 → 401; `"verified": false` (unknown or expired token) → 401; verified but `"sysop": false` → 403. When empty, management is open.
 - `BLACKLIST_URL` — when set, `grant` rejects blacklisted providers (403), and `verify` returns `false` for blacklisted consumers or providers (without 4xx). When empty, no blacklist check.
 - `HMAC_SECRET` — secret used to sign `BASE64_SELF_CONTAINED` tokens (HMAC-SHA256). Default: `arrowhead-default-secret`. Set to a strong random value in production. Added in Step 34 (G23).
 
@@ -1149,7 +1149,7 @@ Note: `serviceDefinitition` (double 't') and `cloudIdentitifer` (missing 'n') ar
 - `AUTH_SYSTEM_URL` — default `http://localhost:8081`
 - `ENABLE_AUTH` — `true`/`false`, default `false`
 - `ENABLE_IDENTITY_CHECK` — `true`/`false`, default `false`. When `true`, requires a valid Bearer token issued by the Authentication system. The verified identity overrides the self-reported `requesterSystem.systemName`, preventing impersonation.
-- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints require an `Authorization: Bearer` token verified against this Authentication system URL. Only tokens with `sysop: true` are accepted. When empty, management endpoints are open (development mode).
+- `MGMT_AUTH_URL` — when set, all `/mgmt/*` endpoints require an `Authorization: Bearer` token verified against this Authentication system URL. Only tokens with `sysop: true` are accepted: missing token → 401; Authentication unreachable or non-200 → 401; `"verified": false` → 401; verified but not sysop → 403. When empty, management endpoints are open (development mode).
 - `BLACKLIST_URL` — when set, the Blacklist system is consulted to reject blacklisted requesters (step 2.5) and filter blacklisted providers (step 4). When empty, no blacklist check is performed.
 - `PUSH_DELIVERY_TIMEOUT_SECONDS` — HTTP timeout per push notification delivery attempt. Default: `5`.
 - `QOS_EVALUATOR_URL` — when set, DynamicOrchestration calls `POST <QOS_EVALUATOR_URL>/deviceqosevaluator/quality-evaluation/measure` for each candidate when `qualityRequirements[]` is present in the request. Fail-open: if the evaluator is unreachable, the candidate is included. When empty, a NopQoSClient (fail-open) is used. Added in Step 36 (G40).
@@ -1291,6 +1291,7 @@ Returns all recorded history entries (both PULL and PUSH types).
 **Response: 200 OK:** `{ "entries": [ /* HistoryEntry[] */ ], "count": N }`
 
 History `status` values: `DONE` (pull completed), `PENDING` (push triggered, delivery stub), `ERROR`.
+(Foundation package only; the deployed `dynamicorch-xacml` also sets `DELIVERED` and `FAILED`, see `core/SPEC.md`.)
 History `type` values: `PULL`, `PUSH`.
 
 ### Push orchestration (subscribe / unsubscribe)
@@ -1339,6 +1340,13 @@ Cancels subscriptions by comma-separated IDs.
 
 Manually triggers a push notification for a subscription. Records a `PUSH/PENDING` history entry.
 Actual notification delivery is a stub — no HTTP call is made to the subscriber.
+
+**Scope of this stub.** This section describes the foundation DynamicOrchestration
+package (`foundation/internal/orchestration/dynamic`), which has no binary in
+`foundation/cmd/` and is not deployed. The deployed orchestrator is
+`dynamicorch-xacml` (`core/`), whose push trigger delivers for real: it POSTs to
+the subscriber's notify URL and sets the history entry to `DELIVERED` or `FAILED`
+(see `core/SPEC.md`, `mgmt/push/trigger`).
 
 **Request:** `{ "subscriptionId": "<UUID>" }`
 
@@ -1409,10 +1417,33 @@ Removes a rule by ID.
 
 ## Error Format
 
-All error responses use:
+All error responses use the AH5 error envelope written by
+`foundation/internal/httputil.WriteError`:
 ```json
-{ "error": "human-readable message" }
+{
+  "errorMessage":  "systemName must be PascalCase (^[A-Z][A-Za-z0-9]{0,62}$), got: ah5-prov",
+  "errorCode":     400,
+  "exceptionType": "INVALID_PARAMETER",
+  "origin":        "serviceregistry"
+}
 ```
+
+`errorCode` repeats the HTTP status. `exceptionType` is derived from it:
+`400` INVALID_PARAMETER, `401` AUTH_EXCEPTION, `403` FORBIDDEN,
+`404` DATA_NOT_FOUND, `423` LOCKED, `501` NOT_IMPLEMENTED, any other status
+ARROWHEAD_EXCEPTION. `origin` names the system that answered, except for errors
+written by the shared helpers `httputil.DecodeJSON` (`400` invalid JSON) and
+`httputil.RequireMethod` (`405`): these send `"origin": ""`. Clients must not rely
+on `origin` being non-empty.
+
+Exceptions (not an envelope):
+- an unknown path is answered by Go's `http.ServeMux` with `404 page not found`
+  as plain text;
+- the `general/mgmt` endpoints (`POST .../general/mgmt/logs`,
+  `GET .../general/mgmt/get-config`) are registered with method patterns, so a
+  wrong method gets Go's plain-text `405 Method Not Allowed`;
+- a `/consumerauthorization/authorization/verify` decision is a plain JSON
+  Boolean.
 
 Standard HTTP status codes:
 - `400` Bad Request — validation failure
@@ -1819,8 +1850,13 @@ Deletes a bridge. **Response: 200 OK.** `404` if not found.
 
 ## 11. MQTT Communication Profiles (G34)
 
-Added in Step 38. The `core/internal/mqttutil` package provides `MQTTAdapter` which enables
-any core system to subscribe to MQTT request topics and publish replies.
+Added in Step 38. The `foundation/internal/mqttutil` package provides `MQTTAdapter` which
+enables any core system to subscribe to MQTT request topics and publish replies.
+
+**Not wired in this release.** No binary in `foundation/cmd/` (serviceregistry,
+authentication, consumerauth) reads `MQTT_BROKER_URL` or creates an `MQTTAdapter`;
+the package and its unit tests exist, but no deployed system listens on MQTT.
+The topic scheme and configuration below describe the adapter, not a running service.
 
 **Topic scheme:**
 - Request: `ah5/<system>/request`
@@ -1832,7 +1868,7 @@ any core system to subscribe to MQTT request topics and publish replies.
 ```
 
 **Configuration (env vars):**
-- `MQTT_BROKER_URL` — when set (e.g. `tcp://localhost:1883`), the system creates an `MQTTAdapter` and subscribes to its request topic. When empty, no MQTT listener is started.
+- `MQTT_BROKER_URL` — intended to enable the adapter (e.g. `tcp://localhost:1883`). Not read by any binary in this release (see above); setting it has no effect.
 
 **Interface name:** `MQTT-INSECURE-JSON` (defined as `mqttutil.MQTTInterfaceName`).
 

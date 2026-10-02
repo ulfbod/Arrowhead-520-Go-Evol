@@ -10,7 +10,9 @@ import (
 
 // Repository defines storage operations for service instances.
 type Repository interface {
-	Save(svc *model.ServiceInstance) *model.ServiceInstance
+	// Save upserts by natural key and returns the stored instance with its id.
+	// A non-nil error reports a failed write.
+	Save(svc *model.ServiceInstance) (*model.ServiceInstance, error)
 	All() []*model.ServiceInstance
 	Delete(serviceDefinition, systemName, address string, port, version int) bool
 }
@@ -34,7 +36,7 @@ func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{byKey: make(map[key]*model.ServiceInstance)}
 }
 
-func (r *MemoryRepository) Save(svc *model.ServiceInstance) *model.ServiceInstance {
+func (r *MemoryRepository) Save(svc *model.ServiceInstance) (*model.ServiceInstance, error) {
 	k := key{
 		serviceDefinition: svc.ServiceDefinition,
 		systemName:        svc.ProviderSystem.SystemName,
@@ -51,11 +53,11 @@ func (r *MemoryRepository) Save(svc *model.ServiceInstance) *model.ServiceInstan
 		existing.Metadata = svc.Metadata
 		existing.Secure = svc.Secure
 		existing.ProviderSystem.AuthenticationInfo = svc.ProviderSystem.AuthenticationInfo
-		return existing
+		return existing, nil
 	}
 	svc.ID = atomic.AddInt64(&r.counter, 1)
 	r.byKey[k] = svc
-	return svc
+	return svc, nil
 }
 
 func (r *MemoryRepository) All() []*model.ServiceInstance {

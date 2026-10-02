@@ -44,13 +44,13 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 // Close releases the database connection.
 func (r *SQLiteRepository) Close() error { return r.db.Close() }
 
-func (r *SQLiteRepository) Save(policy model.AuthPolicy) model.AuthPolicy {
+func (r *SQLiteRepository) Save(policy model.AuthPolicy) (model.AuthPolicy, error) {
 	if policy.CreatedAt == "" {
 		policy.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	listJSON, _ := json.Marshal(policy.DefaultPolicy.PolicyList)
 	scopedJSON, _ := json.Marshal(policy.ScopedPolicies)
-	r.db.Exec(`INSERT INTO auth_policies
+	_, err := r.db.Exec(`INSERT INTO auth_policies
 		(instance_id, auth_level, cloud, provider, target_type, target, description,
 		 default_policy_type, default_policy_list, scoped_policies, created_by, created_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
@@ -65,7 +65,10 @@ func (r *SQLiteRepository) Save(policy model.AuthPolicy) model.AuthPolicy {
 		policy.DefaultPolicy.PolicyType, string(listJSON), string(scopedJSON),
 		policy.CreatedBy, policy.CreatedAt,
 	)
-	return policy
+	if err != nil {
+		return model.AuthPolicy{}, err
+	}
+	return policy, nil
 }
 
 func (r *SQLiteRepository) Delete(instanceID string) bool {

@@ -2,7 +2,7 @@
 # Extended with connection-time cert-validity pre-gate (D2'): before consulting
 # AuthzForce, handleUser and handleVhost query PIP directly. If certValid=false,
 # the AMQP connection is rejected without calling AuthzForce at all.
-# Build context: repo root (Arrowhead-520-evol/)
+# Build context: repo root (Arrowhead-520-Go-Evol/)
 
 FROM golang:1.25-alpine AS builder
 ENV GOTOOLCHAIN=auto

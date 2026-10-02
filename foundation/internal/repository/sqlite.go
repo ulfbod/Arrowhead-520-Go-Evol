@@ -48,13 +48,17 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 
 func (r *SQLiteRepository) Close() error { return r.db.Close() }
 
-func (r *SQLiteRepository) Save(svc *model.ServiceInstance) *model.ServiceInstance {
+func (r *SQLiteRepository) Save(svc *model.ServiceInstance) (*model.ServiceInstance, error) {
 	ifaces, _ := json.Marshal(svc.Interfaces)
 	meta, _ := json.Marshal(svc.Metadata)
 	secure := svc.Secure
 	authInfo := svc.ProviderSystem.AuthenticationInfo
 
-	res, err := r.db.Exec(`INSERT INTO service_instances
+	// RETURNING gives the row's own id on both the insert and the update branch.
+	// LastInsertId cannot be used here: it is per connection and keeps the id of
+	// the previous insert when the upsert takes the update branch.
+	var id int64
+	err := r.db.QueryRow(`INSERT INTO service_instances
 		(service_definition, system_name, address, port, version, service_uri, interfaces, metadata, secure, auth_info)
 		VALUES (?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(service_definition, system_name, address, port, version) DO UPDATE SET
@@ -62,24 +66,17 @@ func (r *SQLiteRepository) Save(svc *model.ServiceInstance) *model.ServiceInstan
 			interfaces=excluded.interfaces,
 			metadata=excluded.metadata,
 			secure=excluded.secure,
-			auth_info=excluded.auth_info`,
+			auth_info=excluded.auth_info
+		RETURNING id`,
 		svc.ServiceDefinition, svc.ProviderSystem.SystemName, svc.ProviderSystem.Address,
 		svc.ProviderSystem.Port, svc.Version, svc.ServiceUri,
 		string(ifaces), string(meta), secure, authInfo,
-	)
+	).Scan(&id)
 	if err != nil {
-		return svc
-	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		// UPDATE path: fetch the existing id
-		r.db.QueryRow(`SELECT id FROM service_instances WHERE service_definition=? AND system_name=? AND address=? AND port=? AND version=?`,
-			svc.ServiceDefinition, svc.ProviderSystem.SystemName, svc.ProviderSystem.Address,
-			svc.ProviderSystem.Port, svc.Version,
-		).Scan(&id)
+		return nil, err
 	}
 	svc.ID = id
-	return svc
+	return svc, nil
 }
 
 func (r *SQLiteRepository) All() []*model.ServiceInstance {

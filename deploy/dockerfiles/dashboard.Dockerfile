@@ -1,5 +1,5 @@
 # Dashboard — React+Vite app served by nginx.
-# Build context: repo root (Arrowhead-520-evol/)
+# Build context: repo root (Arrowhead-520-Go-Evol/)
 
 FROM node:20-alpine AS build
 WORKDIR /app

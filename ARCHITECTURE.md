@@ -1,4 +1,4 @@
-# ARCHITECTURE.md — Arrowhead-520-evol
+# ARCHITECTURE.md — Arrowhead-520-Go-Evol
 
 ## System Overview
 
@@ -91,10 +91,35 @@ PKI certificate management, and multi-transport enforcement.
 | Kafdrop | 9000 | 9000 | infra |
 | Dashboard | 80 | 3000 | dashboard |
 
+## Published Images
+
+A version tag (`v*`) on the public repository triggers
+`.github/workflows/images.yml`, which builds six images and pushes them to the
+GitHub Container Registry. The image tag equals the git tag; no `latest` tag is
+published, so downstream compose files pin an exact version.
+
+| Image | Compose service | Dockerfile | Build context |
+|---|---|---|---|
+| `ghcr.io/ulfbod/serviceregistry:<tag>` | `serviceregistry` | `deploy/dockerfiles/foundation.Dockerfile` (`CMD=serviceregistry`) | `foundation/` |
+| `ghcr.io/ulfbod/authentication:<tag>` | `authentication` | `deploy/dockerfiles/foundation.Dockerfile` (`CMD=authentication`) | `foundation/` |
+| `ghcr.io/ulfbod/consumerauth:<tag>` | `consumerauth` | `deploy/dockerfiles/foundation.Dockerfile` (`CMD=consumerauth`) | `foundation/` |
+| `ghcr.io/ulfbod/dynamicorch-xacml:<tag>` | `dynamicorch-xacml` | `deploy/dockerfiles/dynamicorch-xacml.Dockerfile` | repo root |
+| `ghcr.io/ulfbod/profile-ca:<tag>` | `profile-ca` | `deploy/dockerfiles/profile-ca.Dockerfile` | repo root |
+| `ghcr.io/ulfbod/cert-provisioner:<tag>` | `cert-provisioner` | `deploy/dockerfiles/cert-provisioner.Dockerfile` | repo root |
+
+Example: tag `v0.1.0` produces `ghcr.io/ulfbod/profile-ca:v0.1.0`. The other
+services in `deploy/docker-compose.yml` are built from source only.
+
+`deploy/docker-compose.consumerauth.yml` runs exactly these six services, with
+`dynamicorch-xacml` in `AUTH_BACKEND=consumerauth` mode (no authz-pdp or
+AuthzForce). `TestConsumerAuthMode` in `tests/integration/` checks that stack:
+a pull returns no provider without a ConsumerAuthorization rule and only the
+granted provider with one.
+
 ## Directory Tree
 
 ```
-Arrowhead-520-evol/
+Arrowhead-520-Go-Evol/
 ├── core/                  ← ADAPI stack: authz-pdp + dynamicorch-xacml
 ├── foundation/            ← AH5 systems: ServiceRegistry, Authentication, ConsumerAuth
 ├── services/              ← Promoted services: profile-ca, pap, PEPs, cert-provisioner

@@ -79,3 +79,16 @@ func TestSQLiteAuthPolicyDelete(t *testing.T) {
 		t.Fatal("expected empty after delete")
 	}
 }
+
+// TestSQLiteSave_ClosedDB_ReturnsError: a failed policy write is reported, not
+// returned as if stored (the grant would otherwise answer 201).
+func TestSQLiteSave_ClosedDB_ReturnsError(t *testing.T) {
+	repo, err := repository.NewSQLiteRepository(t.TempDir() + "/closed.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteRepository: %v", err)
+	}
+	repo.Close()
+	if _, err := repo.Save(model.AuthPolicy{InstanceID: "PR|LOCAL|P|SERVICE_DEF|svc", Provider: "P", TargetType: "SERVICE_DEF", Target: "svc"}); err == nil {
+		t.Error("expected an error on a closed database")
+	}
+}

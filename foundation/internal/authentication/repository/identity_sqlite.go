@@ -34,7 +34,7 @@ func NewSQLiteIdentityRepository(dbPath string) (*SQLiteIdentityRepository, erro
 
 func (r *SQLiteIdentityRepository) Close() error { return r.db.Close() }
 
-func (r *SQLiteIdentityRepository) Save(id Identity) {
+func (r *SQLiteIdentityRepository) Save(id Identity) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if id.CreatedAt == "" {
 		id.CreatedAt = now
@@ -44,7 +44,7 @@ func (r *SQLiteIdentityRepository) Save(id Identity) {
 	if id.Sysop {
 		sysop = 1
 	}
-	r.db.Exec(`INSERT INTO identities (system_name, password_hash, sysop, created_by, created_at, updated_at)
+	_, err := r.db.Exec(`INSERT INTO identities (system_name, password_hash, sysop, created_by, created_at, updated_at)
 		VALUES (?,?,?,?,?,?)
 		ON CONFLICT(system_name) DO UPDATE SET
 			password_hash=excluded.password_hash,
@@ -53,6 +53,7 @@ func (r *SQLiteIdentityRepository) Save(id Identity) {
 			updated_at=excluded.updated_at`,
 		id.SystemName, id.PasswordHash, sysop, id.CreatedBy, id.CreatedAt, id.UpdatedAt,
 	)
+	return err
 }
 
 func (r *SQLiteIdentityRepository) Get(systemName string) (Identity, bool) {
@@ -69,8 +70,9 @@ func (r *SQLiteIdentityRepository) Get(systemName string) (Identity, bool) {
 	return id, true
 }
 
-func (r *SQLiteIdentityRepository) Delete(systemName string) {
-	r.db.Exec(`DELETE FROM identities WHERE system_name=?`, systemName)
+func (r *SQLiteIdentityRepository) Delete(systemName string) error {
+	_, err := r.db.Exec(`DELETE FROM identities WHERE system_name=?`, systemName)
+	return err
 }
 
 func (r *SQLiteIdentityRepository) All() []Identity {

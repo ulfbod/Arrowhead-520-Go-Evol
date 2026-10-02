@@ -88,8 +88,9 @@ func ExtractBearer(r *http.Request) string {
 
 // VerifyTokenIdentity checks that the Bearer token in r identifies claimedName.
 // When registerAuthURL is empty, returns (true, 0) — open registration mode.
-// When set: missing token → (false, 401); auth unreachable → (false, 401) fail-closed;
-// name mismatch → (false, 403); name match → (true, 0).
+// When set: missing token → (false, 401); auth unreachable or non-200 → (false, 401)
+// fail-closed; "verified": false → (false, 401); name mismatch → (false, 403);
+// name match → (true, 0).
 func VerifyTokenIdentity(r *http.Request, registerAuthURL, claimedName string) (bool, int) {
 	if registerAuthURL == "" {
 		return true, 0
@@ -104,9 +105,10 @@ func VerifyTokenIdentity(r *http.Request, registerAuthURL, claimedName string) (
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	var body struct {
+		Verified   bool   `json:"verified"`
 		SystemName string `json:"systemName"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || !body.Verified {
 		return false, http.StatusUnauthorized
 	}
 	if body.SystemName != claimedName {
@@ -120,8 +122,9 @@ func VerifyTokenIdentity(r *http.Request, registerAuthURL, claimedName string) (
 //
 // When mgmtAuthURL is empty, always returns true (development/PoC mode).
 // When set, the token is verified via GET <mgmtAuthURL>/authentication/identity/verify/<token>.
-// A missing or invalid token → 401. A valid non-sysop token → 403. Auth system
-// unreachable → 401 (fail-closed).
+// A missing token, an unverified token ("verified": false) or an undecodable
+// answer → 401. A verified non-sysop token → 403. Auth system unreachable or
+// non-200 → 401 (fail-closed).
 func RequireManagementAuth(w http.ResponseWriter, r *http.Request, mgmtAuthURL, origin string) bool {
 	if mgmtAuthURL == "" {
 		return true
@@ -138,9 +141,14 @@ func RequireManagementAuth(w http.ResponseWriter, r *http.Request, mgmtAuthURL, 
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	var body struct {
-		Sysop bool `json:"sysop"`
+		Verified bool `json:"verified"`
+		Sysop    bool `json:"sysop"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || !body.Sysop {
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || !body.Verified {
+		WriteError(w, http.StatusUnauthorized, "management access denied: token invalid or expired", origin)
+		return false
+	}
+	if !body.Sysop {
 		WriteError(w, http.StatusForbidden, "management access denied: sysop privilege required", origin)
 		return false
 	}

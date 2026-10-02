@@ -20,6 +20,8 @@ var (
 	ErrMissingSystemName  = errors.New("systemName is required")
 	ErrInvalidToken       = errors.New("invalid or expired token")
 	ErrInvalidCredentials = errors.New("invalid credentials")
+	// ErrStorage wraps a failed write in the token or identity store (500 in the API).
+	ErrStorage = errors.New("storage error")
 )
 
 // AuthService manages identity tokens.
@@ -104,7 +106,9 @@ func (s *AuthService) Login(req model.LoginRequest) (*model.LoginResponse, error
 		ExpiresAt:  now.Add(s.tokenDuration),
 		LoginTime:  now,
 	}
-	s.repo.Save(token)
+	if err := s.repo.Save(token); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrStorage, err)
+	}
 	return &model.LoginResponse{
 		Token:          token.Token,
 		SystemName:     token.SystemName,
@@ -191,7 +195,9 @@ func (s *AuthService) CreateIdentities(reqs []CreateIdentityRequest) ([]Identity
 			Sysop:        req.Sysop,
 			CreatedBy:    req.CreatedBy,
 		}
-		s.identityRepo.Save(id)
+		if err := s.identityRepo.Save(id); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrStorage, err)
+		}
 		saved, _ := s.identityRepo.Get(req.SystemName)
 		result = append(result, toRecord(saved))
 	}
@@ -217,21 +223,27 @@ func (s *AuthService) UpdateIdentities(reqs []CreateIdentityRequest) ([]Identity
 		existing.PasswordHash = string(hash)
 		existing.Sysop = req.Sysop
 		existing.CreatedBy = req.CreatedBy
-		s.identityRepo.Save(existing)
+		if err := s.identityRepo.Save(existing); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrStorage, err)
+		}
 		saved, _ := s.identityRepo.Get(req.SystemName)
 		result = append(result, toRecord(saved))
 	}
 	return result, nil
 }
 
-// DeleteIdentities removes identity records by system name.
-func (s *AuthService) DeleteIdentities(names []string) {
+// DeleteIdentities removes identity records by system name. A failed write
+// stops the loop and returns an ErrStorage-wrapped error.
+func (s *AuthService) DeleteIdentities(names []string) error {
 	if s.identityRepo == nil {
-		return
+		return nil
 	}
 	for _, name := range names {
-		s.identityRepo.Delete(name)
+		if err := s.identityRepo.Delete(name); err != nil {
+			return fmt.Errorf("%w: %v", ErrStorage, err)
+		}
 	}
+	return nil
 }
 
 // QueryIdentities returns all stored identity records (no passwords).
@@ -281,11 +293,16 @@ func (s *AuthService) QuerySessions() []SessionRecord {
 	return result
 }
 
-// RevokeSessions deletes all tokens for the given system names.
-func (s *AuthService) RevokeSessions(names []string) {
+// RevokeSessions deletes all tokens for the given system names. A failed write
+// stops the loop and returns an ErrStorage-wrapped error: the tokens of that
+// system may still verify, so the caller must not report success.
+func (s *AuthService) RevokeSessions(names []string) error {
 	for _, name := range names {
-		s.repo.DeleteBySystemName(name)
+		if err := s.repo.DeleteBySystemName(name); err != nil {
+			return fmt.Errorf("%w: %v", ErrStorage, err)
+		}
 	}
+	return nil
 }
 
 func toRecord(id repository.Identity) IdentityRecord {

@@ -72,3 +72,29 @@ func TestSQLiteAuthTokenDeleteAndExpired(t *testing.T) {
 		t.Error("deleted token should not exist")
 	}
 }
+
+// TestSQLiteSave_ClosedDB_ReturnsError: a token that could not be stored must
+// not be handed out by login.
+func TestSQLiteSave_ClosedDB_ReturnsError(t *testing.T) {
+	repo, err := repository.NewSQLiteRepository(t.TempDir() + "/closed.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteRepository: %v", err)
+	}
+	repo.Close()
+	if err := repo.Save(&model.IdentityToken{Token: "t", SystemName: "s", ExpiresAt: time.Now().Add(time.Hour), LoginTime: time.Now()}); err == nil {
+		t.Error("expected an error on a closed database")
+	}
+}
+
+// TestSQLiteDeleteBySystemName_ClosedDB_ReturnsError: a failed session revoke
+// is reported, so the API cannot answer success while the tokens still verify.
+func TestSQLiteDeleteBySystemName_ClosedDB_ReturnsError(t *testing.T) {
+	repo, err := repository.NewSQLiteRepository(t.TempDir() + "/closed.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteRepository: %v", err)
+	}
+	repo.Close()
+	if err := repo.DeleteBySystemName("s"); err == nil {
+		t.Error("expected an error on a closed database")
+	}
+}

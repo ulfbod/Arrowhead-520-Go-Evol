@@ -85,18 +85,41 @@ func ah5SQLiteNow() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // ─── Devices ─────────────────────────────────────────────────────────────────
 
-func (s *AH5SQLiteStore) SaveDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool) {
+// upsertReportingCreated runs an INSERT … ON CONFLICT DO UPDATE and reports
+// whether the row is new. SQLite's RowsAffected is 1 on both the insert and the
+// update path, so it cannot tell them apart; instead the existence check and the
+// upsert run in one transaction.
+func (s *AH5SQLiteStore) upsertReportingCreated(existsQuery string, key any, upsert string, args ...any) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	var exists bool
+	if err := tx.QueryRow(existsQuery, key).Scan(&exists); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(upsert, args...); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return !exists, nil
+}
+
+func (s *AH5SQLiteStore) SaveDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool, error) {
 	meta, _ := json.Marshal(req.Metadata)
 	addrs, _ := json.Marshal(req.Addresses)
 	t := ah5SQLiteNow()
-	res, _ := s.db.Exec(`INSERT INTO devices (name, metadata, addresses, created_at, updated_at) VALUES (?,?,?,?,?)
+	created, err := s.upsertReportingCreated(`SELECT EXISTS(SELECT 1 FROM devices WHERE name=?)`, req.Name,
+		`INSERT INTO devices (name, metadata, addresses, created_at, updated_at) VALUES (?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET metadata=excluded.metadata, addresses=excluded.addresses, updated_at=excluded.updated_at`,
 		req.Name, string(meta), string(addrs), t, t)
-	created := false
-	if n, _ := res.RowsAffected(); n > 0 {
-		created = true
+	if err != nil {
+		return nil, false, err
 	}
-	return s.GetDevice(req.Name), created
+	return s.GetDevice(req.Name), created, nil
 }
 
 func (s *AH5SQLiteStore) GetDevice(name string) *model.Device {
@@ -127,10 +150,16 @@ func (s *AH5SQLiteStore) AllDevices() []*model.Device {
 	return out
 }
 
-func (s *AH5SQLiteStore) DeleteDevice(name string) bool {
-	res, _ := s.db.Exec(`DELETE FROM devices WHERE name=?`, name)
-	n, _ := res.RowsAffected()
-	return n > 0
+func (s *AH5SQLiteStore) DeleteDevice(name string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM devices WHERE name=?`, name)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *AH5SQLiteStore) CreateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool) {
@@ -148,15 +177,20 @@ func (s *AH5SQLiteStore) CreateDevice(req *model.DeviceRegistrationRequest) (*mo
 	return s.GetDevice(req.Name), true
 }
 
-func (s *AH5SQLiteStore) UpdateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool) {
+func (s *AH5SQLiteStore) UpdateDevice(req *model.DeviceRegistrationRequest) (*model.Device, bool, error) {
 	meta, _ := json.Marshal(req.Metadata)
 	addrs, _ := json.Marshal(req.Addresses)
-	res, _ := s.db.Exec(`UPDATE devices SET metadata=?, addresses=?, updated_at=? WHERE name=?`,
+	res, err := s.db.Exec(`UPDATE devices SET metadata=?, addresses=?, updated_at=? WHERE name=?`,
 		string(meta), string(addrs), ah5SQLiteNow(), req.Name)
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, false
+	if err != nil {
+		return nil, false, err
 	}
-	return s.GetDevice(req.Name), true
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, false, err
+	} else if n == 0 {
+		return nil, false, nil
+	}
+	return s.GetDevice(req.Name), true, nil
 }
 
 func (s *AH5SQLiteStore) HasDependentSystems(deviceName string) bool {
@@ -167,18 +201,18 @@ func (s *AH5SQLiteStore) HasDependentSystems(deviceName string) bool {
 
 // ─── Systems ──────────────────────────────────────────────────────────────────
 
-func (s *AH5SQLiteStore) SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool) {
+func (s *AH5SQLiteStore) SaveSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool, error) {
 	meta, _ := json.Marshal(req.Metadata)
 	addrs, _ := json.Marshal(req.Addresses)
 	t := ah5SQLiteNow()
-	res, _ := s.db.Exec(`INSERT INTO systems (name, device_name, metadata, version, addresses, created_at, updated_at) VALUES (?,?,?,?,?,?,?)
+	created, err := s.upsertReportingCreated(`SELECT EXISTS(SELECT 1 FROM systems WHERE name=?)`, req.Name,
+		`INSERT INTO systems (name, device_name, metadata, version, addresses, created_at, updated_at) VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET device_name=excluded.device_name, metadata=excluded.metadata, version=excluded.version, addresses=excluded.addresses, updated_at=excluded.updated_at`,
 		req.Name, req.DeviceName, string(meta), req.Version, string(addrs), t, t)
-	created := false
-	if n, _ := res.RowsAffected(); n > 0 {
-		created = true
+	if err != nil {
+		return nil, false, err
 	}
-	return s.GetSystem(req.Name), created
+	return s.GetSystem(req.Name), created, nil
 }
 
 func (s *AH5SQLiteStore) GetSystem(name string) *model.AH5System {
@@ -215,10 +249,16 @@ func (s *AH5SQLiteStore) AllSystems() []*model.AH5System {
 	return out
 }
 
-func (s *AH5SQLiteStore) DeleteSystem(name string) bool {
-	res, _ := s.db.Exec(`DELETE FROM systems WHERE name=?`, name)
-	n, _ := res.RowsAffected()
-	return n > 0
+func (s *AH5SQLiteStore) DeleteSystem(name string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM systems WHERE name=?`, name)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *AH5SQLiteStore) CreateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool) {
@@ -236,15 +276,20 @@ func (s *AH5SQLiteStore) CreateSystem(req *model.SystemRegistrationRequest) (*mo
 	return s.GetSystem(req.Name), true
 }
 
-func (s *AH5SQLiteStore) UpdateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool) {
+func (s *AH5SQLiteStore) UpdateSystem(req *model.SystemRegistrationRequest) (*model.AH5System, bool, error) {
 	meta, _ := json.Marshal(req.Metadata)
 	addrs, _ := json.Marshal(req.Addresses)
-	res, _ := s.db.Exec(`UPDATE systems SET device_name=?, metadata=?, version=?, addresses=?, updated_at=? WHERE name=?`,
+	res, err := s.db.Exec(`UPDATE systems SET device_name=?, metadata=?, version=?, addresses=?, updated_at=? WHERE name=?`,
 		req.DeviceName, string(meta), req.Version, string(addrs), ah5SQLiteNow(), req.Name)
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, false
+	if err != nil {
+		return nil, false, err
 	}
-	return s.GetSystem(req.Name), true
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, false, err
+	} else if n == 0 {
+		return nil, false, nil
+	}
+	return s.GetSystem(req.Name), true, nil
 }
 
 // ─── ServiceDefinitions ───────────────────────────────────────────────────────
@@ -384,21 +429,21 @@ func (s *AH5SQLiteStore) DeleteInterfaceTemplates(names []string) {
 
 // ─── ServiceInstances ─────────────────────────────────────────────────────────
 
-func (s *AH5SQLiteStore) SaveServiceInstance(req *model.ServiceRegistrationRequest) (*model.AH5ServiceInstance, bool) {
+func (s *AH5SQLiteStore) SaveServiceInstance(req *model.ServiceRegistrationRequest) (*model.AH5ServiceInstance, bool, error) {
 	id := compositeServiceID(req.SystemName, req.ServiceDefinitionName, req.Version)
 	meta, _ := json.Marshal(req.Metadata)
 	ifaces, _ := json.Marshal(req.Interfaces)
 	t := ah5SQLiteNow()
-	res, _ := s.db.Exec(`INSERT INTO ah5_service_instances
+	created, err := s.upsertReportingCreated(`SELECT EXISTS(SELECT 1 FROM ah5_service_instances WHERE instance_id=?)`, id,
+		`INSERT INTO ah5_service_instances
 		(instance_id, system_name, service_def_name, version, expires_at, metadata, interfaces, created_at, updated_at)
 		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(instance_id) DO UPDATE SET expires_at=excluded.expires_at, metadata=excluded.metadata, interfaces=excluded.interfaces, updated_at=excluded.updated_at`,
 		id, req.SystemName, req.ServiceDefinitionName, req.Version, req.ExpiresAt, string(meta), string(ifaces), t, t)
-	created := false
-	if n, _ := res.RowsAffected(); n > 0 {
-		created = true
+	if err != nil {
+		return nil, false, err
 	}
-	return s.getServiceInstance(id), created
+	return s.getServiceInstance(id), created, nil
 }
 
 func (s *AH5SQLiteStore) CreateServiceInstance(req *model.ServiceCreateRequest) (*model.AH5ServiceInstance, bool) {
@@ -419,15 +464,20 @@ func (s *AH5SQLiteStore) CreateServiceInstance(req *model.ServiceCreateRequest) 
 	return s.getServiceInstance(id), true
 }
 
-func (s *AH5SQLiteStore) UpdateServiceInstance(req *model.ServiceUpdateRequest) (*model.AH5ServiceInstance, bool) {
+func (s *AH5SQLiteStore) UpdateServiceInstance(req *model.ServiceUpdateRequest) (*model.AH5ServiceInstance, bool, error) {
 	meta, _ := json.Marshal(req.Metadata)
 	ifaces, _ := json.Marshal(req.Interfaces)
-	res, _ := s.db.Exec(`UPDATE ah5_service_instances SET expires_at=?, metadata=?, interfaces=?, updated_at=? WHERE instance_id=?`,
+	res, err := s.db.Exec(`UPDATE ah5_service_instances SET expires_at=?, metadata=?, interfaces=?, updated_at=? WHERE instance_id=?`,
 		req.ExpiresAt, string(meta), string(ifaces), ah5SQLiteNow(), req.InstanceID)
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, false
+	if err != nil {
+		return nil, false, err
 	}
-	return s.getServiceInstance(req.InstanceID), true
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, false, err
+	} else if n == 0 {
+		return nil, false, nil
+	}
+	return s.getServiceInstance(req.InstanceID), true, nil
 }
 
 func (s *AH5SQLiteStore) AllServiceInstances() []*model.AH5ServiceInstance {
@@ -451,10 +501,16 @@ func (s *AH5SQLiteStore) AllServiceInstances() []*model.AH5ServiceInstance {
 	return out
 }
 
-func (s *AH5SQLiteStore) DeleteServiceInstance(id string) bool {
-	res, _ := s.db.Exec(`DELETE FROM ah5_service_instances WHERE instance_id=?`, id)
-	n, _ := res.RowsAffected()
-	return n > 0
+func (s *AH5SQLiteStore) DeleteServiceInstance(id string) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM ah5_service_instances WHERE instance_id=?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *AH5SQLiteStore) DeleteServiceInstances(ids []string) {

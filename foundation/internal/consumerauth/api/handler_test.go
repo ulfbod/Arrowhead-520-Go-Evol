@@ -904,7 +904,7 @@ func TestTokenGenerateNoAuthURLSucceeds(t *testing.T) {
 // TestTokenGenerateAuthURLRequiresBearer — TOKEN_AUTH_URL set, no header → 401.
 func TestTokenGenerateAuthURLRequiresBearer(t *testing.T) {
 	mockAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"systemName": "ConsumerA"})
+		json.NewEncoder(w).Encode(map[string]any{"verified": true, "systemName": "ConsumerA"})
 	}))
 	defer mockAuth.Close()
 	h := newTestHandlerWithTokenAuthURL(mockAuth.URL)
@@ -923,7 +923,7 @@ func TestTokenGenerateAuthURLRequiresBearer(t *testing.T) {
 // TestTokenGenerateIdentityMatchesConsumer — mock auth returns "ConsumerA", consumer="ConsumerA" → 201.
 func TestTokenGenerateIdentityMatchesConsumer(t *testing.T) {
 	mockAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"systemName": "ConsumerA"})
+		json.NewEncoder(w).Encode(map[string]any{"verified": true, "systemName": "ConsumerA"})
 	}))
 	defer mockAuth.Close()
 	h := newTestHandlerWithTokenAuthURL(mockAuth.URL)
@@ -942,7 +942,7 @@ func TestTokenGenerateIdentityMatchesConsumer(t *testing.T) {
 // TestTokenGenerateIdentityMismatchRejects — mock returns "ConsumerA", consumer="ConsumerB" → 403.
 func TestTokenGenerateIdentityMismatchRejects(t *testing.T) {
 	mockAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"systemName": "ConsumerA"})
+		json.NewEncoder(w).Encode(map[string]any{"verified": true, "systemName": "ConsumerA"})
 	}))
 	defer mockAuth.Close()
 	h := newTestHandlerWithTokenAuthURL(mockAuth.URL)

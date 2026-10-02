@@ -1,7 +1,7 @@
 # Kafdrop Dockerfile.
 # Extends the official Kafdrop image with a startup script that generates
 # kafka.properties using PEM certs from the shared certs volume (mTLS Kafka).
-# Build context: repo root (Arrowhead-520-evol/)
+# Build context: repo root (Arrowhead-520-Go-Evol/)
 
 FROM obsidiandynamics/kafdrop:latest
 

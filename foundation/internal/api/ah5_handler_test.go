@@ -1046,7 +1046,7 @@ func TestMgmtOpenWhenMgmtAuthURLUnset(t *testing.T) {
 
 func TestMgmtRequiresBearerWhenMgmtAuthURLSet(t *testing.T) {
 	fakeMgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"systemName": "sysop-sys", "sysop": true}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"verified": true, "systemName": "sysop-sys", "sysop": true}) //nolint:errcheck
 	}))
 	defer fakeMgmt.Close()
 
@@ -1064,7 +1064,7 @@ func TestMgmtRequiresBearerWhenMgmtAuthURLSet(t *testing.T) {
 
 func TestMgmtValidSysopTokenSucceeds(t *testing.T) {
 	fakeMgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"systemName": "sysop-sys", "sysop": true}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"verified": true, "systemName": "sysop-sys", "sysop": true}) //nolint:errcheck
 	}))
 	defer fakeMgmt.Close()
 
@@ -1082,7 +1082,7 @@ func TestMgmtValidSysopTokenSucceeds(t *testing.T) {
 
 func TestMgmtNonSysopTokenForbidden(t *testing.T) {
 	fakeMgmt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"systemName": "regular-sys", "sysop": false}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"verified": true, "systemName": "regular-sys", "sysop": false}) //nolint:errcheck
 	}))
 	defer fakeMgmt.Close()
 
@@ -1520,5 +1520,55 @@ func TestDiscoveryPolicyRestrictedAuthUnreachable(t *testing.T) {
 	resp := lookupServicesByDef(t, h, "temperature", "any-token")
 	if resp.Count != 1 {
 		t.Errorf("restricted+auth unreachable: expected 1 (unrestricted) result, got %d", resp.Count)
+	}
+}
+
+// TestServiceRegister_StorageError_Returns500: a failed store write reaches
+// the client as a 500 AH5 envelope, not as a panic or a 400.
+func TestServiceRegister_StorageError_Returns500(t *testing.T) {
+	store, err := repository.NewAH5SQLiteStore(t.TempDir() + "/closed.db")
+	if err != nil {
+		t.Fatalf("NewAH5SQLiteStore: %v", err)
+	}
+	store.Close()
+	h := api.NewAH5Handler(service.NewAH5RegistryService(store), "", "", "")
+
+	body := `{"systemName":"Provider1","serviceDefinitionName":"temperature","version":"1.0.0"}`
+	req := httptest.NewRequest(http.MethodPost, "/serviceregistry/service-discovery/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500; body %s", w.Code, w.Body.String())
+	}
+	var env map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env["exceptionType"] != "ARROWHEAD_EXCEPTION" || env["origin"] != "serviceregistry" {
+		t.Errorf("envelope: got %v", env)
+	}
+}
+
+// TestServiceRegister_SecondRegisterReturns200 pins 201 then 200 on the
+// SQLite store, the store the deployed ServiceRegistry uses.
+func TestServiceRegister_SecondRegisterReturns200_SQLite(t *testing.T) {
+	store, err := repository.NewAH5SQLiteStore(t.TempDir() + "/reg.db")
+	if err != nil {
+		t.Fatalf("NewAH5SQLiteStore: %v", err)
+	}
+	defer store.Close()
+	h := api.NewAH5Handler(service.NewAH5RegistryService(store), "", "", "")
+
+	body := `{"systemName":"Provider1","serviceDefinitionName":"temperature","version":"1.0.0"}`
+	for i, want := range []int{http.StatusCreated, http.StatusOK} {
+		req := httptest.NewRequest(http.MethodPost, "/serviceregistry/service-discovery/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Errorf("register #%d: got %d want %d; body %s", i+1, w.Code, want, w.Body.String())
+		}
 	}
 }

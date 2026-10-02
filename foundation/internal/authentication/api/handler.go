@@ -47,6 +47,8 @@ func NewHandler(svc *service.AuthService, mgmtAuthURL string) http.Handler {
 // statusFor maps sentinel errors to HTTP status codes.
 func statusFor(err error) int {
 	switch {
+	case errors.Is(err, service.ErrStorage):
+		return http.StatusInternalServerError
 	case errors.Is(err, service.ErrInvalidCredentials):
 		return http.StatusUnauthorized
 	case errors.Is(err, service.ErrInvalidToken):
@@ -230,7 +232,7 @@ func (h *Handler) mgmtIdentitiesCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	records, err := h.svc.CreateIdentities(req.Identities)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error(), authOrigin)
+		httputil.WriteError(w, statusFor(err), err.Error(), authOrigin)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusCreated, map[string]any{"identities": records}, authOrigin)
@@ -247,7 +249,7 @@ func (h *Handler) mgmtIdentitiesUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	records, err := h.svc.UpdateIdentities(req.Identities)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error(), authOrigin)
+		httputil.WriteError(w, statusFor(err), err.Error(), authOrigin)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, map[string]any{"identities": records}, authOrigin)
@@ -260,7 +262,10 @@ func (h *Handler) mgmtIdentitiesDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	names := strings.Split(namesParam, ",")
-	h.svc.DeleteIdentities(names)
+	if err := h.svc.DeleteIdentities(names); err != nil {
+		httputil.WriteError(w, statusFor(err), err.Error(), authOrigin)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -289,7 +294,10 @@ func (h *Handler) handleMgmtSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		names := strings.Split(namesParam, ",")
-		h.svc.RevokeSessions(names)
+		if err := h.svc.RevokeSessions(names); err != nil {
+			httputil.WriteError(w, statusFor(err), err.Error(), authOrigin)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "POST or DELETE required", authOrigin)

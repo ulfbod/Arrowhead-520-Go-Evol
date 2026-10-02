@@ -16,19 +16,24 @@ import (
 
 // ─── CADecider tests ─────────────────────────────────────────────────────────
 
+// fakeConsumerAuth serves the AH5 ConsumerAuthorization verify endpoint the
+// way the foundation does: only on the AH5 path, answering with a plain JSON
+// Boolean. Any other path gets 404, as from the foundation's ServeMux.
+func fakeConsumerAuth(answer bool) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/consumerauthorization/authorization/verify", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(answer)
+	})
+	return httptest.NewServer(mux)
+}
+
 func TestCADecider_Permit(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/consumerauth/verify" {
-			http.Error(w, "unexpected", http.StatusInternalServerError)
-			return
-		}
-		var req caVerifyRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "decode: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		json.NewEncoder(w).Encode(caVerifyResponse{Authorized: true})
-	}))
+	srv := fakeConsumerAuth(true)
 	defer srv.Close()
 
 	d := NewCADecider(srv.URL)
@@ -42,9 +47,7 @@ func TestCADecider_Permit(t *testing.T) {
 }
 
 func TestCADecider_Deny(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(caVerifyResponse{Authorized: false})
-	}))
+	srv := fakeConsumerAuth(false)
 	defer srv.Close()
 
 	d := NewCADecider(srv.URL)
@@ -83,6 +86,21 @@ func TestCADecider_BadJSON_ReturnsError(t *testing.T) {
 	}
 }
 
+// A wrapped object is not the AH5 response shape; it must not be read as a
+// decision (fail-closed).
+func TestCADecider_WrappedObject_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"authorized":true}`)
+	}))
+	defer srv.Close()
+
+	d := NewCADecider(srv.URL)
+	ok, err := d.Decide("", "consumer", "telemetry", "provider-1", "")
+	if err == nil || ok {
+		t.Fatalf("expected error and false on wrapped-object body, got ok=%v err=%v", ok, err)
+	}
+}
+
 func TestCADecider_NetworkError_ReturnsError(t *testing.T) {
 	d := NewCADecider("http://127.0.0.1:1") // nothing listening
 	_, err := d.Decide("", "consumer", "telemetry", "provider-1", "")
@@ -91,25 +109,49 @@ func TestCADecider_NetworkError_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestCADecider_RequestFieldMapping(t *testing.T) {
-	var captured caVerifyRequest
+// The wire contract: path, method and the exact JSON keys of the AH5 verify
+// body. Decoded into a generic map so the test does not share the struct
+// under test.
+func TestCADecider_RequestWireShape(t *testing.T) {
+	var (
+		gotPath, gotMethod, gotContentType string
+		captured                           map[string]any
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod, gotContentType = r.URL.Path, r.Method, r.Header.Get("Content-Type")
 		json.NewDecoder(r.Body).Decode(&captured)
-		json.NewEncoder(w).Encode(caVerifyResponse{Authorized: true})
+		fmt.Fprint(w, "true\n")
 	}))
 	defer srv.Close()
 
 	d := NewCADecider(srv.URL)
-	d.Decide("ignored-domain", "my-consumer", "temperature", "my-provider", "ignored-action")
+	ok, err := d.Decide("ignored-domain", "my-consumer", "temperature", "my-provider", "ignored-action")
+	if err != nil || !ok {
+		t.Fatalf("Decide: ok=%v err=%v", ok, err)
+	}
 
-	if captured.ConsumerSystemName != "my-consumer" {
-		t.Errorf("consumerSystemName: got %q", captured.ConsumerSystemName)
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got %q", gotMethod)
 	}
-	if captured.ProviderSystemName != "my-provider" {
-		t.Errorf("providerSystemName: got %q", captured.ProviderSystemName)
+	if gotPath != "/consumerauthorization/authorization/verify" {
+		t.Errorf("path: got %q", gotPath)
 	}
-	if captured.ServiceDefinition != "temperature" {
-		t.Errorf("serviceDefinition: got %q", captured.ServiceDefinition)
+	if gotContentType != "application/json" {
+		t.Errorf("content-type: got %q", gotContentType)
+	}
+	want := map[string]any{
+		"consumer":   "my-consumer",
+		"provider":   "my-provider",
+		"target":     "temperature",
+		"targetType": "SERVICE_DEF",
+	}
+	if len(captured) != len(want) {
+		t.Errorf("body keys: got %v, want exactly %v", captured, want)
+	}
+	for k, v := range want {
+		if captured[k] != v {
+			t.Errorf("body[%q]: got %v, want %v", k, captured[k], v)
+		}
 	}
 }
 

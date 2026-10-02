@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"arrowhead/core/internal/generalmgmt"
@@ -67,18 +68,21 @@ func main() {
 
 	mgmtAuthURL := envOr("MGMT_AUTH_URL", "")
 
+	// get-config keys are the environment variable names (SPEC.md).
 	mgmtHandler := generalmgmt.NewHandler(buf, "serviceorchestration/orchestration", map[string]string{
-		"srUrl":                        srURL,
-		"authBackend":                  authBackend,
-		"domainId":                     domainID,
-		"enableAuth":                   envOr("ENABLE_AUTH", "true"),
-		"port":                         port,
-		"MGMT_AUTH_URL":                mgmtAuthURL,
+		"SR_URL":                        srURL,
+		"AUTHZ_PDP_ADDR":                authzPDPAddr,
+		"CA_URL":                        caURL,
+		"AUTH_BACKEND":                  authBackend,
+		"ENABLE_AUTH":                   strconv.FormatBool(enableAuth),
+		"PORT":                          port,
+		"DOMAIN_ID":                     domainID,
+		"MGMT_AUTH_URL":                 mgmtAuthURL,
 		"PUSH_DELIVERY_TIMEOUT_SECONDS": envOr("PUSH_DELIVERY_TIMEOUT_SECONDS", "5"),
 	})
 
 	sysHandler := http.NewServeMux()
-	orchestration.RegisterRoutes(sysHandler, orch, domainID, enableAuth, mgmtAuthURL)
+	orchestration.RegisterRoutes(sysHandler, orch, authBackend, enableAuth, mgmtAuthURL)
 
 	root := http.NewServeMux()
 	root.Handle("/serviceorchestration/orchestration/general/", mgmtHandler)

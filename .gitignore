@@ -35,5 +35,19 @@ coverage/
 # ── Database ──────────────────────────────────────────────────────────────────
 *.db
 
-# ── Local development support ─────────────────────────────────────────────────
-dev-support/
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+
+# ── Compiled service binaries (go build output in module directories) ────────
+/services/cert-provisioner/cert-provisioner
+/services/kafka-authz/kafka-authz
+/services/kafka-authz/kafka-authz-service
+/services/pap/pap
+/services/pki-rest-authz/pki-rest-authz
+/services/profile-ca/profile-ca
+/services/topic-auth-xacml/topic-auth-xacml-service
+/shared/authzforce-server/authzforce-server
+/shared/kafka-authz/kafka-authz
+/shared/policy-sync/policy-sync
+/shared/rest-authz/rest-authz
+/shared/topic-auth-xacml/topic-auth-xacml
