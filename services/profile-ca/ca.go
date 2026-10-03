@@ -14,7 +14,7 @@
 //	de client cert → sy
 //
 // Features:
-//   - CertRecord registry (in-memory, protected by mu)
+//   - CertRecord registry (protected by mu; persisted to records.json, see store.go)
 //   - Revoke(cn) — marks revoked
 //   - Reissue(cn) — un-revokes
 //   - GetAll() — returns all non-revoked records (snapshot)
@@ -34,9 +34,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -50,9 +48,12 @@ const (
 )
 
 // CertRecord holds registry metadata for an issued certificate.
+// Records are immutable once stored: a change replaces the pointer in the map, so
+// a record returned by GetRecord never changes under the caller.
 type CertRecord struct {
 	CN        string
 	OU        string
+	Serial    int64
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 	Revoked   bool
@@ -60,62 +61,144 @@ type CertRecord struct {
 
 // ProfileCA is the Local Cloud Certificate Authority with profile enforcement.
 type ProfileCA struct {
-	caKey      *ecdsa.PrivateKey
-	caCert     *x509.Certificate
-	caCertPEM  []byte
-	certDur    time.Duration
-	mu         sync.Mutex
-	nextSerial atomic.Int64
+	caKey     *ecdsa.PrivateKey
+	caCert    *x509.Certificate
+	caCertPEM []byte
+	certDur   time.Duration
+	paths     statePaths
 
-	// Cert registry (protected by mu).
-	records map[string]*CertRecord
+	// mu protects records and nextSerial, and serialises state writes.
+	mu         sync.Mutex
+	records    map[string]*CertRecord
+	nextSerial int64
 }
 
-// loadOrGenerateKey loads the ECDSA CA key from keyFile if it exists,
-// or generates a new key and saves it to keyFile (if keyFile is non-empty).
-// This ensures the CA key survives container restarts.
-func loadOrGenerateKey(keyFile string) (*ecdsa.PrivateKey, error) {
-	if keyFile != "" {
-		if data, err := os.ReadFile(keyFile); err == nil {
-			block, _ := pem.Decode(data)
-			if block != nil {
-				key, parseErr := x509.ParseECPrivateKey(block.Bytes)
-				if parseErr == nil {
-					log.Printf("[profile-ca] loaded CA key from %s", keyFile)
-					return key, nil
-				}
-			}
+// NewProfileCA creates a Local Cloud CA with the given leaf cert lifetime.
+// keyFile is the CA key path; ca.crt and records.json are kept next to it.
+// An empty keyFile gives an ephemeral CA that persists nothing; only unit tests
+// use that (main always passes a path, see CA_KEY_FILE in SPEC.md).
+func NewProfileCA(certDuration time.Duration, keyFile string) (*ProfileCA, error) {
+	return newProfileCA(certDuration, resolvePaths(keyFile, "", ""))
+}
+
+// NewProfileCAFromFiles is NewProfileCA with explicit certificate and state
+// paths (empty = default next to keyFile).
+func NewProfileCAFromFiles(certDuration time.Duration, keyFile, certFile, stateFile string) (*ProfileCA, error) {
+	return newProfileCA(certDuration, resolvePaths(keyFile, certFile, stateFile))
+}
+
+// newProfileCA loads the persisted CA (SPEC.md "Persistent State", start-up) or,
+// on a first start, generates and persists a new one. Any existing file that
+// cannot be read or parsed is an error: the CA never silently replaces state.
+func newProfileCA(certDuration time.Duration, p statePaths) (*ProfileCA, error) {
+	ca := &ProfileCA{
+		certDur:    certDuration,
+		paths:      p,
+		records:    make(map[string]*CertRecord),
+		nextSerial: firstSerial,
+	}
+	if !p.persistent() {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("generate CA key: %w", err)
 		}
+		if err := ca.setNewCACert(key); err != nil {
+			return nil, err
+		}
+		return ca, nil
 	}
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	removed, err := removeLeftoverTemps(p)
+	for _, f := range removed {
+		log.Printf("[profile-ca] removed leftover temp file %s from an interrupted write", f)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("generate CA key: %w", err)
+		return nil, err
 	}
 
-	if keyFile != "" {
+	keyData, keyExists, err := readIfExists(p.key)
+	if err != nil {
+		return nil, fmt.Errorf("read CA key %s: %w", p.key, err)
+	}
+	certData, certExists, err := readIfExists(p.cert)
+	if err != nil {
+		return nil, fmt.Errorf("read CA certificate %s: %w", p.cert, err)
+	}
+	stateData, stateExists, err := readIfExists(p.state)
+	if err != nil {
+		return nil, fmt.Errorf("read CA state %s: %w", p.state, err)
+	}
+	if !keyExists && (certExists || stateExists) {
+		return nil, fmt.Errorf("CA key %s is missing but %s or %s exists; refusing to start with a new key", p.key, p.cert, p.state)
+	}
+	if stateExists && !certExists {
+		// Only key-only (v0.1.1) may get a new CA certificate; with records present
+		// a missing certificate means state was lost, not an upgrade.
+		return nil, fmt.Errorf("CA certificate %s is missing but %s exists; refusing to create a new CA certificate", p.cert, p.state)
+	}
+
+	// Key: load, or generate and persist on a first start.
+	var key *ecdsa.PrivateKey
+	if keyExists {
+		key, err = parseECKey(keyData)
+		if err != nil {
+			return nil, fmt.Errorf("CA key %s: %w", p.key, err)
+		}
+		log.Printf("[profile-ca] loaded CA key from %s", p.key)
+	} else {
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("generate CA key: %w", err)
+		}
 		der, err := x509.MarshalECPrivateKey(key)
 		if err != nil {
 			return nil, fmt.Errorf("marshal new CA key: %w", err)
 		}
-		pemData := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
-		if err := os.WriteFile(keyFile, pemData, 0o600); err != nil {
-			log.Printf("[profile-ca] WARNING: could not save CA key to %s: %v", keyFile, err)
-		} else {
-			log.Printf("[profile-ca] generated and saved new CA key to %s", keyFile)
+		if err := writeFileAtomic(p.key, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+			return nil, fmt.Errorf("write CA key %s: %w", p.key, err)
 		}
+		log.Printf("[profile-ca] generated and saved new CA key to %s", p.key)
 	}
-	return key, nil
+
+	// Certificate: reuse byte for byte, or create once from the key (first start,
+	// or the v0.1.1 upgrade with key only).
+	if certExists {
+		if err := ca.loadCACert(certData, key); err != nil {
+			return nil, fmt.Errorf("CA certificate %s: %w", p.cert, err)
+		}
+		log.Printf("[profile-ca] loaded CA certificate from %s", p.cert)
+	} else {
+		if err := ca.setNewCACert(key); err != nil {
+			return nil, err
+		}
+		if err := writeFileAtomic(p.cert, ca.caCertPEM, 0o644); err != nil {
+			return nil, fmt.Errorf("write CA certificate %s: %w", p.cert, err)
+		}
+		log.Printf("[profile-ca] created and saved CA certificate to %s", p.cert)
+	}
+
+	// Records and serial counter.
+	if stateExists {
+		records, next, err := decodeState(stateData)
+		if err != nil {
+			return nil, fmt.Errorf("CA state %s: %w", p.state, err)
+		}
+		ca.records, ca.nextSerial = records, next
+		log.Printf("[profile-ca] loaded %d certificate records from %s (next serial %d)", len(records), p.state, next)
+	}
+	return ca, nil
 }
 
-// NewProfileCA creates a new Local Cloud CA with the given cert lifetime.
-// keyFile is the path to persist the CA key across restarts (empty = ephemeral).
-func NewProfileCA(certDuration time.Duration, keyFile string) (*ProfileCA, error) {
-	key, err := loadOrGenerateKey(keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("CA key: %w", err)
+func parseECKey(data []byte) (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("no PEM block")
 	}
+	return x509.ParseECPrivateKey(block.Bytes)
+}
 
+// setNewCACert creates the self-signed CA certificate for key.
+func (ca *ProfileCA) setNewCACert(key *ecdsa.PrivateKey) error {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
@@ -132,29 +215,67 @@ func NewProfileCA(certDuration time.Duration, keyFile string) (*ProfileCA, error
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 	}
-
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
-		return nil, fmt.Errorf("create CA cert: %w", err)
+		return fmt.Errorf("create CA cert: %w", err)
 	}
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
-		return nil, fmt.Errorf("parse CA cert: %w", err)
+		return fmt.Errorf("parse CA cert: %w", err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	ca.caKey, ca.caCert = key, cert
+	ca.caCertPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	return nil
+}
 
-	ca := &ProfileCA{
-		caKey:     key,
-		caCert:    cert,
-		caCertPEM: certPEM,
-		certDur:   certDuration,
-		records:   make(map[string]*CertRecord),
+// loadCACert parses a persisted CA certificate and checks it belongs to key.
+func (ca *ProfileCA) loadCACert(data []byte, key *ecdsa.PrivateKey) error {
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return errors.New("no PEM CERTIFICATE block")
 	}
-	ca.nextSerial.Store(2)
-	return ca, nil
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return err
+	}
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !pub.Equal(&key.PublicKey) {
+		return errors.New("certificate does not match the CA key")
+	}
+	ca.caKey, ca.caCert, ca.caCertPEM = key, cert, data
+	return nil
+}
+
+// commitLocked makes records/nextSerial the new state: it persists them first
+// (if the CA is persistent) and swaps them in only after the write succeeded.
+// The caller holds mu.
+func (ca *ProfileCA) commitLocked(records map[string]*CertRecord, nextSerial int64) error {
+	if ca.paths.persistent() {
+		data, err := encodeState(records, nextSerial)
+		if err != nil {
+			return fmt.Errorf("%w: encode: %v", errPersist, err)
+		}
+		if err := writeFileAtomic(ca.paths.state, data, 0o600); err != nil {
+			return fmt.Errorf("%w: %s: %v", errPersist, ca.paths.state, err)
+		}
+	}
+	ca.records, ca.nextSerial = records, nextSerial
+	return nil
+}
+
+// withRecord returns a copy of the record map with cn set to rec.
+func (ca *ProfileCA) withRecord(cn string, rec *CertRecord) map[string]*CertRecord {
+	out := make(map[string]*CertRecord, len(ca.records)+1)
+	for k, v := range ca.records {
+		out[k] = v
+	}
+	out[cn] = rec
+	return out
 }
 
 // issueCert is the internal cert issuance. Profile is set in OU.
+// The certificate and key are returned only after the record and the advanced
+// serial counter are durable (SPEC.md "Persistent State", writes).
 func (ca *ProfileCA) issueCert(systemName string, profile CertProfile) (certPEM, keyPEM string, err error) {
 	if systemName == "" {
 		return "", "", errors.New("systemName is required")
@@ -165,9 +286,11 @@ func (ca *ProfileCA) issueCert(systemName string, profile CertProfile) (certPEM,
 		return "", "", fmt.Errorf("generate key: %w", err)
 	}
 
-	serial := ca.nextSerial.Add(1)
-	now := time.Now()
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
 
+	serial := ca.nextSerial
+	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(serial),
 		Subject: pkix.Name{
@@ -181,33 +304,29 @@ func (ca *ProfileCA) issueCert(systemName string, profile CertProfile) (certPEM,
 		KeyUsage:    x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 	}
-
-	ca.mu.Lock()
-	der, createErr := x509.CreateCertificate(rand.Reader, template, ca.caCert, &leafKey.PublicKey, ca.caKey)
-	if createErr == nil {
-		rec := &CertRecord{
-			CN:        systemName,
-			OU:        string(profile),
-			IssuedAt:  now,
-			ExpiresAt: now.Add(ca.certDur),
-			Revoked:   false,
-		}
-		ca.records[systemName] = rec
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.caCert, &leafKey.PublicKey, ca.caKey)
+	if err != nil {
+		return "", "", fmt.Errorf("create certificate: %w", err)
 	}
-	ca.mu.Unlock()
-
-	if createErr != nil {
-		return "", "", fmt.Errorf("create certificate: %w", createErr)
+	rec := &CertRecord{
+		CN:        systemName,
+		OU:        string(profile),
+		Serial:    serial,
+		IssuedAt:  now,
+		ExpiresAt: now.Add(ca.certDur),
 	}
-
-	certPEMBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	// On a failed write nothing changes: the certificate is discarded unreturned
+	// and its serial is used again by the next successful issue.
+	if err := ca.commitLocked(ca.withRecord(systemName, rec), serial+1); err != nil {
+		return "", "", err
+	}
 
 	keyBytes, err := x509.MarshalECPrivateKey(leafKey)
 	if err != nil {
 		return "", "", fmt.Errorf("marshal key: %w", err)
 	}
+	certPEMBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEMBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
-
 	return string(certPEMBytes), string(keyPEMBytes), nil
 }
 
@@ -243,25 +362,20 @@ func (ca *ProfileCA) IssueInfraCert(systemName string) (certPEM, keyPEM string, 
 }
 
 // Reissue un-revokes a previously revoked certificate.
-// Returns an error if the CN is not found or the certificate is not currently revoked.
+// Returns an error if the CN is not found or the certificate is not currently
+// revoked, or an errPersist-wrapped error if the new state cannot be written.
 func (ca *ProfileCA) Reissue(cn string) error {
-	ca.mu.Lock()
-	defer ca.mu.Unlock()
-
-	rec, ok := ca.records[cn]
-	if !ok {
-		return fmt.Errorf("certificate not found: %s", cn)
-	}
-	if !rec.Revoked {
-		return fmt.Errorf("certificate not revoked: %s", cn)
-	}
-	rec.Revoked = false
-	return nil
+	return ca.setRevoked(cn, false)
 }
 
 // Revoke marks the certificate with the given CN as revoked.
-// Returns an error if CN is not found or is already revoked.
+// Returns an error if CN is not found or is already revoked, or an
+// errPersist-wrapped error if the new state cannot be written.
 func (ca *ProfileCA) Revoke(cn string) error {
+	return ca.setRevoked(cn, true)
+}
+
+func (ca *ProfileCA) setRevoked(cn string, revoked bool) error {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
@@ -269,11 +383,15 @@ func (ca *ProfileCA) Revoke(cn string) error {
 	if !ok {
 		return fmt.Errorf("certificate not found: %s", cn)
 	}
-	if rec.Revoked {
-		return fmt.Errorf("certificate already revoked: %s", cn)
+	if rec.Revoked == revoked {
+		if revoked {
+			return fmt.Errorf("certificate already revoked: %s", cn)
+		}
+		return fmt.Errorf("certificate not revoked: %s", cn)
 	}
-	rec.Revoked = true
-	return nil
+	updated := *rec
+	updated.Revoked = revoked
+	return ca.commitLocked(ca.withRecord(cn, &updated), ca.nextSerial)
 }
 
 // GetAll returns all non-revoked certificate records (snapshot).

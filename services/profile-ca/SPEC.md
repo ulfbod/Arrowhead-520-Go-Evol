@@ -10,7 +10,75 @@ Arrowhead 5.2 Local Cloud Certificate Authority with integrated PIP.
 |---|---|---|---|
 | `PORT` | `8787` | No | Plain HTTP listen port |
 | `TLS_PORT` | `8788` | No | mTLS HTTPS listen port |
-| `CA_KEY_FILE` | `/data/ca.key` | No | Path to persist CA private key |
+| `CA_KEY_FILE` | `/data/ca.key` | No | Path of the persisted CA private key. Unset or empty means the default; the service always persists. (An ephemeral, non-persisting CA exists only inside the unit tests.) |
+| `CA_CERT_FILE` | `ca.crt` next to `CA_KEY_FILE` | No | Path of the persisted CA certificate (PEM) |
+| `CA_STATE_FILE` | `records.json` next to `CA_KEY_FILE` | No | Path of the persisted certificate records and serial counter |
+
+---
+
+## Persistent State
+
+The CA keeps three files, by default in the `/data` volume:
+
+| File | Content | Mode |
+|---|---|---|
+| `ca.key` | CA private key, PEM `EC PRIVATE KEY` | `0600` |
+| `ca.crt` | CA certificate, PEM `CERTIFICATE` | `0644` |
+| `records.json` | Certificate records and the next serial number | `0600` |
+
+`records.json` format (version 1):
+
+```json
+{
+  "version": 1,
+  "nextSerial": 7,
+  "records": [
+    {"cn": "sensor-1", "ou": "sy", "serial": 6,
+     "issuedAt": "2026-10-03T10:00:00Z", "expiresAt": "2027-10-03T10:00:00Z",
+     "revoked": false}
+  ]
+}
+```
+
+One record per Common Name; issuing again for a CN replaces its record.
+
+**Writes.** Every issue, revoke and reissue writes the complete new state to a
+temporary file in the same directory, fsyncs it, renames it over the state file and
+fsyncs the directory, all while holding the CA lock. The certificate and private
+key, or the `204`, are returned only after that write has completed. If the write
+fails, the request fails with `500` and the in-memory state is left unchanged.
+A request that is interrupted before it answers may be lost; a request that
+answered success is not.
+
+Known edge: if the directory fsync fails after the rename succeeded, the request
+answers `500` although the new state file is already in place, so the disk is
+briefly ahead of memory. The next successful write (which writes the in-memory
+state) or a restart (which loads the file) brings them back in line.
+
+**Start-up.**
+
+- No key, certificate or state file: first start. A new key and CA certificate are
+  generated and written; the record set is empty; the first issued serial is `3`.
+- All present: the key, the certificate and the records are loaded. The CA
+  certificate is reused byte for byte, so its fingerprint does not change across
+  restarts, and certificates issued before a restart still verify. Serial numbers
+  continue from the stored counter and are never reused.
+- Key present, certificate and state both absent (state written by v0.1.1 or
+  earlier): the CA certificate is created once from the existing key and written.
+  Certificates issued before this upgrade were signed by the same key and still
+  verify. This is the only case in which a CA certificate is created for an
+  existing key.
+- Leftover temporary files from an interrupted write (`.ca.key.tmp-*`,
+  `.ca.crt.tmp-*`, `.records.json.tmp-*` in the state directories) are removed at
+  start, before anything is loaded, with a log line per file; the last complete
+  state file is used.
+- Start-up fails (non-zero exit, a log line naming the file and the reason) if the
+  key file exists but cannot be read or parsed, the certificate file exists but
+  cannot be read or parsed or does not match the key, the state file exists but
+  cannot be read or parsed, a certificate or state file exists without a key file,
+  the state file exists without a certificate file, a leftover temporary file cannot
+  be removed, or a newly generated key or certificate cannot be written. The CA never replaces
+  an existing key, certificate or state file silently.
 
 ---
 
@@ -58,6 +126,7 @@ Issue an Onboarding certificate (OU=on). No authentication required.
 | Status | Condition |
 |---|---|
 | `400` | Empty systemName |
+| `500` | The record could not be written; no certificate is returned |
 
 ### `POST /ca/certificate/issue`
 
@@ -75,6 +144,7 @@ Revoke a certificate by Common Name.
 | Status | Condition |
 |---|---|
 | `404` | CN not found or already revoked |
+| `500` | The new state could not be written; the certificate stays as it was |
 
 ### `POST /ca/certificates/{cn}/reissue`
 
@@ -85,6 +155,7 @@ Un-revoke a previously revoked certificate.
 | Status | Condition |
 |---|---|
 | `404` | CN not found or not currently revoked |
+| `500` | The new state could not be written; the certificate stays revoked |
 
 ---
 
@@ -181,6 +252,7 @@ Issue a Device certificate (OU=de). Requires Onboarding (OU=on) client cert.
 |---|---|
 | `400` | Invalid JSON |
 | `403` | Client cert is not OU=on |
+| `500` | The record could not be written; no certificate is returned |
 
 ### `POST /ca/system-cert`
 
@@ -192,3 +264,4 @@ Issue a System certificate (OU=sy). Requires Device (OU=de) client cert.
 |---|---|
 | `400` | Invalid JSON |
 | `403` | Client cert is not OU=de |
+| `500` | The record could not be written; no certificate is returned |

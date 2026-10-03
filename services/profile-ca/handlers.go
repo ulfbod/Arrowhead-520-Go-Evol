@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -45,7 +46,7 @@ func handleBootstrapOnboarding(ca *ProfileCA) http.HandlerFunc {
 		}
 		certPEM, keyPEM, err := ca.IssueOnboardingCert(req.SystemName)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeError(w, caErrorStatus(err, http.StatusBadRequest), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusCreated, certResponse{
@@ -71,7 +72,7 @@ func handleIssueInfra(ca *ProfileCA) http.HandlerFunc {
 		}
 		certPEM, keyPEM, err := ca.IssueInfraCert(req.SystemName)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeError(w, caErrorStatus(err, http.StatusBadRequest), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusCreated, certResponse{
@@ -103,7 +104,7 @@ func handleDeviceCert(ca *ProfileCA) http.HandlerFunc {
 		}
 		certPEM, keyPEM, err := ca.IssueDeviceCert(req.SystemName, clientCert)
 		if err != nil {
-			writeError(w, http.StatusForbidden, err.Error())
+			writeError(w, caErrorStatus(err, http.StatusForbidden), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusCreated, certResponse{
@@ -135,7 +136,7 @@ func handleSystemCert(ca *ProfileCA) http.HandlerFunc {
 		}
 		certPEM, keyPEM, err := ca.IssueSystemCert(req.SystemName, clientCert)
 		if err != nil {
-			writeError(w, http.StatusForbidden, err.Error())
+			writeError(w, caErrorStatus(err, http.StatusForbidden), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusCreated, certResponse{
@@ -163,7 +164,7 @@ func handleReissue(ca *ProfileCA) http.HandlerFunc {
 			return
 		}
 		if err := ca.Reissue(cn); err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeError(w, caErrorStatus(err, http.StatusNotFound), err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -184,11 +185,20 @@ func handleRevoke(ca *ProfileCA) http.HandlerFunc {
 			return
 		}
 		if err := ca.Revoke(cn); err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeError(w, caErrorStatus(err, http.StatusNotFound), err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// caErrorStatus maps a CA error to an HTTP status: a failed state write is 500
+// (the request did not take effect); anything else keeps the endpoint's status.
+func caErrorStatus(err error, otherwise int) int {
+	if errors.Is(err, errPersist) {
+		return http.StatusInternalServerError
+	}
+	return otherwise
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

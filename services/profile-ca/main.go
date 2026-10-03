@@ -17,8 +17,11 @@
 //
 // Environment variables:
 //
-//	PORT      Plain HTTP port (default: 8787)
-//	TLS_PORT  mTLS HTTPS port (default: 8788)
+//	PORT           Plain HTTP port (default: 8787)
+//	TLS_PORT       mTLS HTTPS port (default: 8788)
+//	CA_KEY_FILE    CA key path (default: /data/ca.key; unset or empty = default, always persisted)
+//	CA_CERT_FILE   CA certificate path (default: ca.crt next to CA_KEY_FILE)
+//	CA_STATE_FILE  records and serial counter (default: records.json next to CA_KEY_FILE)
 package main
 
 import (
@@ -43,7 +46,8 @@ func main() {
 	tlsPort := envOr("TLS_PORT", "8788")
 	keyFile := envOr("CA_KEY_FILE", "/data/ca.key")
 
-	ca, err := NewProfileCA(365*24*time.Hour, keyFile)
+	// ca.crt and records.json default to the directory of CA_KEY_FILE.
+	ca, err := NewProfileCAFromFiles(365*24*time.Hour, keyFile, os.Getenv("CA_CERT_FILE"), os.Getenv("CA_STATE_FILE"))
 	if err != nil {
 		log.Fatalf("[profile-ca] create CA: %v", err)
 	}
