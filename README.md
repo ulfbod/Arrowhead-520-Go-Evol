@@ -1,7 +1,9 @@
 # Arrowhead-520-Go-Evol
 
-Arrowhead 5.2 evolved authorization stack with gRPC-based XACML PDP,
-profile-based PKI, CA-as-PIP, and multi-transport policy enforcement.
+Arrowhead 5.2 evolved authorization stack with a gRPC PDP interface that sends
+XACML requests, profile-based PKI, CA-as-PIP, and multi-transport policy
+enforcement. The bundled policy decision point is an AuthzForce-compatible
+stand-in that matches grant pairs; see "Known limitations" in ARCHITECTURE.md.
 
 ## Quick start
 
@@ -24,7 +26,7 @@ open http://localhost:9000    # Kafdrop (Kafka UI)
 | Authentication | 8491 | AH5 identity management |
 | ConsumerAuth | 8492 | AH5 consumer authorization |
 | PAP | 9505 | Policy Administration Point |
-| AuthzForce | 8096 | XACML policy engine |
+| AuthzForce (stand-in) | 8896 | AuthzForce-compatible PDP/PAP stand-in: permits iff a (subject, resource) grant exists; evaluates no XACML policy |
 | kafka-authz | 9101 | Kafka message PEP |
 | topic-auth-xacml | 9090 | RabbitMQ connection PEP |
 | pki-rest-authz | 9208/9209 | REST mTLS proxy PEP |

@@ -45,6 +45,10 @@ service AuthorizationPDP {
 - Missing `subject`, `service`, or `action` → `INDETERMINATE`
 - AuthzForce error → `INDETERMINATE`
 - Empty `provider` → omitted from XACML request (service-level decision)
+- authz-pdp returns `PERMIT` when the PDP answers Permit and `DENY` otherwise;
+  `NOT_APPLICABLE` is never returned. The PDP bundled in `deploy/docker-compose.yml`
+  (`shared/authzforce-server`) decides on (subject, resource) only and ignores
+  `action`, `provider`, cert-level and cert-valid.
 
 **Inspection:**
 ```bash

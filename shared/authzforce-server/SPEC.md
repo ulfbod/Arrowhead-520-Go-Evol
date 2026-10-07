@@ -1,9 +1,15 @@
 # authzforce-server — HTTP API Specification
 
-`authzforce-server` is a lightweight in-memory XACML 3.0 PDP/PAP that implements the
-AuthzForce CE REST API. It replaces a full AuthzForce CE deployment in experiments,
-providing domain management, policy upload, and authorization evaluation without
-requiring a JVM.
+`authzforce-server` is a lightweight in-memory PDP/PAP stand-in that implements the
+AuthzForce CE REST API. It replaces a full AuthzForce CE deployment, providing domain
+management, policy upload and a decision endpoint without requiring a JVM.
+
+**It evaluates no XACML policy.** An uploaded PolicySet is reduced to a set of
+(consumer, service) grants taken from the `PolicyId`s, and a decision request is
+`Permit` if and only if its (`subject-id`, `resource-id`) pair is in that set,
+otherwise `Deny`. Every other attribute (action, provider, cert-level, cert-valid) is
+ignored, so certificate revocation and action- or provider-specific policies are not
+enforced here.
 
 Used by experiments 5 and 6. All three PEP services (`kafka-authz`, `rest-authz`,
 `topic-auth-xacml`) and `policy-sync` talk to the same running instance via the
@@ -242,8 +248,9 @@ Evaluate an authorization request (Policy Decision Point). Checks whether the
 </Request>
 ```
 
-The first two `<AttributeValue>` elements in document order are extracted as `subject`
-and `resource` respectively. The `action` value is parsed but not used in the decision.
+`subject` and `resource` are taken by `AttributeId` (`subject-id`, `resource-id`);
+every other attribute in the request, including `action`, provider, cert-level and
+cert-valid, is ignored by the decision.
 
 **Response `200 OK` — Permit**
 ```xml

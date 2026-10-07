@@ -172,7 +172,9 @@ All PEP clients call these endpoints via `PIP_URL` environment variable.
 
 ### `GET /pip/attributes/{cn}`
 
-XACML-ready certificate validity attributes. Used by PEPs before XACML evaluation.
+XACML-ready certificate validity attributes. topic-auth-xacml refuses `valid: false`
+itself; pki-rest-authz and kafka-authz pass the value to the PDP, and the bundled
+PDP ignores it.
 
 **Response `200 OK`**
 ```json

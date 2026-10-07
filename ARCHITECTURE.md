@@ -3,11 +3,13 @@
 ## System Overview
 
 This system implements the Arrowhead 5.2 evolved authorization stack (ADAPI):
-a gRPC-based XACML PDP with certificate-based PKI, CA-as-PIP, and policy
+a gRPC PDP interface that sends XACML requests, with certificate-based PKI,
+CA-as-PIP, and policy
 enforcement across three transport types (Kafka, RabbitMQ AMQP, REST/mTLS).
 
 The stack builds on the AH5 foundation systems (ServiceRegistry, Authentication,
-ConsumerAuthorization) and extends them with XACML/ABAC authorization, profile-based
+ConsumerAuthorization) and extends them with XACML-request authorization (the
+bundled PDP decides on grant pairs only, see "Known limitations"), profile-based
 PKI certificate management, and multi-transport enforcement.
 
 ## Service Topology
@@ -24,7 +26,7 @@ PKI certificate management, and multi-transport enforcement.
 │           ▼                               ▼                         │
 │  ┌──────────────────┐            ┌──────────────────┐              │
 │  │ ServiceRegistry   │            │   AuthzForce      │              │
-│  │     :8080         │            │     :8096         │              │
+│  │     :8080         │            │     :8896         │              │
 │  └──────────────────┘            └────────▲──────────┘              │
 │                                           │ HTTP                    │
 │                                  ┌────────┴──────────┐              │
@@ -84,7 +86,7 @@ PKI certificate management, and multi-transport enforcement.
 | topic-auth-xacml | 9090 | 9090 | services |
 | pki-rest-authz (mTLS) | 9208 | 9208 | services |
 | pki-rest-authz (HTTP) | 9209 | 9209 | services |
-| AuthzForce | 8080 | 8096 | shared |
+| AuthzForce (stand-in) | 8080 | 8896 | shared |
 | RabbitMQ (AMQPS) | 5671 | 5671 | infra |
 | RabbitMQ Management | 15672 | 15672 | infra |
 | Kafka (TLS) | 9092 | 9092 | infra |
@@ -121,6 +123,21 @@ AuthzForce). `TestConsumerAuthMode` in `tests/integration/` checks that stack:
 a pull returns no provider without a ConsumerAuthorization rule and only the
 granted provider with one.
 
+## Known limitations
+
+- **The bundled PDP evaluates no XACML policy.** The `authzforce` service is
+  `shared/authzforce-server`, an AuthzForce-compatible PDP/PAP stand-in. It accepts
+  PolicySet uploads and XACML requests, but it reads only `subject-id` and
+  `resource-id` and permits if and only if that (subject, resource) grant exists.
+  It ignores `action`, `provider`, `cert-level` and `cert-valid`.
+- **Certificate revocation is enforced only by topic-auth-xacml.** It asks the PIP
+  and refuses `certValid=false` itself, before the PDP. pki-rest-authz and
+  kafka-authz also ask the PIP, but they pass `certValid` to the PDP, which ignores
+  it. A revoked certificate that still has a grant is therefore permitted on the
+  REST and Kafka paths. Removing the grant does deny it.
+- Action- or provider-specific policies are not distinguished by the stand-in: any
+  grant for a (subject, resource) pair permits every action and provider.
+
 ## Directory Tree
 
 ```
@@ -140,9 +157,10 @@ Arrowhead-520-Go-Evol/
 |---|---|---|
 | Backend language | Go | Performance, single binary, strong typing |
 | PDP protocol | gRPC (authorize.proto) | Low latency, type safety, reflection |
-| Policy engine | AuthzForce CE (XACML 3.0) | Standards-based ABAC, mature |
+| Policy engine (deployed) | `shared/authzforce-server`: AuthzForce-compatible PDP/PAP stand-in | Speaks the AuthzForce CE REST API without a JVM; permits iff a (subject, resource) grant exists; evaluates no XACML policy |
+| Policy engine (design target) | AuthzForce CE (XACML 3.0) | Standards-based ABAC; not deployed in this stack |
 | PKI | Profile-based X.509 (lo/on/de/sy) | Arrowhead 5.2 certificate hierarchy |
-| PIP delivery | HTTP from CA (D1) | Zero replication lag, instant revocation |
+| PIP delivery | HTTP from CA (D1) | Zero replication lag; revocation is visible to every PEP at once (enforced only where noted in "Known limitations") |
 | Message brokers | Kafka + RabbitMQ | Multi-transport enforcement validation |
 | Frontend | React + Vite | Component reuse, fast dev cycle |
 | Deployment | Docker Compose | Single-host, reproducible |
@@ -157,5 +175,5 @@ The key design decisions are summarized below.
 | D1 | CA-as-PIP | PIP merged into profile-ca for zero-lag cert queries |
 | D2 | Single gRPC interface | Only authorize.proto; no certlifecycle |
 | D3 | CADecider retained | AH5.2 compliance via ConsumerAuth fallback |
-| D4 | Connection-time pre-gate | PEPs check cert validity before XACML |
+| D4 | Connection-time pre-gate | topic-auth-xacml refuses an invalid certificate before asking the PDP |
 | D5 | Foundation module | AH5 core as separate Go module |

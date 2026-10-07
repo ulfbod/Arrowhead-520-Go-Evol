@@ -7,7 +7,11 @@
 //
 // Decision D1: no PEP-side caching of PIP responses.
 // Decision D2: cert-valid is forwarded to AuthzForce; PEP does not pre-gate on it.
-// Fail-closed: PIP 404 or unreachable → certLevel="", certValid=false → AuthzForce likely DENY.
+// Known limitation: the bundled PDP (shared/authzforce-server) ignores cert-level and
+// cert-valid and permits iff a (subject, resource) grant exists. A revoked
+// certificate that still has a grant is therefore permitted here, and a PIP 404 or
+// outage (certLevel="", certValid=false) does not deny on its own. See
+// ARCHITECTURE.md "Known limitations".
 package main
 
 import (

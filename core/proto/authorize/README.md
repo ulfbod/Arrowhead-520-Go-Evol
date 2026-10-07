@@ -44,13 +44,24 @@ Orchestration and enforcement use the same AuthzForce domain but different
 A policy with `action=orchestrate` never matches an enforcement request
 (`action=consume`), and vice versa. No `@`-encoding needed.
 
+> **Deployed PDP:** this separation, and the per-provider decisions below, need a
+> PDP that evaluates XACML policy (AuthzForce CE). The bundled stand-in
+> (`shared/authzforce-server`) decides on the (subject, resource) pair only and
+> ignores `action` and `provider-id`, so with it any grant for a pair permits every
+> action and provider.
+>
+> **authz-pdp never returns `NOT_APPLICABLE`.** It maps the PDP's answer to `PERMIT`
+> for Permit and `DENY` for anything else (`core/internal/pdpserver/server.go`; the
+> `shared/authzforce` client reduces the answer to permitted or not), with either
+> PDP. Errors and missing fields give `INDETERMINATE`.
+
 ## Decision semantics
 
 | Decision          | Meaning                                      | PEP action              |
 |---|---|---|
 | `PERMIT`          | Policy grants access                         | Allow / include provider |
 | `DENY`            | Policy denies access                         | Block / exclude provider |
-| `NOT_APPLICABLE`  | No policy matched; default deny-unless-permit| Block / exclude provider |
+| `NOT_APPLICABLE`  | No policy matched; default deny-unless-permit (defined by the proto; authz-pdp returns `DENY` instead) | Block / exclude provider |
 | `INDETERMINATE`   | Evaluation error (missing attr, syntax err)  | Block (fail-closed)      |
 | gRPC error        | PDP unreachable or internal failure          | Block (fail-closed)      |
 
@@ -98,11 +109,11 @@ grpcurl -plaintext \
   localhost:9550 arrowhead.authz.v1.AuthorizationPDP/Decide
 # → {"decision":"PERMIT","statusCode":"urn:oasis:names:tc:xacml:1.0:status:ok"}
 
-# Orchestration: unknown consumer — no policy → NOT_APPLICABLE → deny
+# Orchestration: unknown consumer — no policy → DENY
 grpcurl -plaintext \
   -d '{"subject":"unknown","service":"telemetry","provider":"robot-fleet-site-1","action":"orchestrate"}' \
   localhost:9550 arrowhead.authz.v1.AuthorizationPDP/Decide
-# → {"decision":"NOT_APPLICABLE","statusCode":"urn:oasis:names:tc:xacml:1.0:status:ok"}
+# → {"decision":"DENY","statusCode":"urn:oasis:names:tc:xacml:1.0:status:ok"}
 
 # Enforcement: portal-cloud-ml may consume telemetry (no provider constraint)
 grpcurl -plaintext \
@@ -112,6 +123,10 @@ grpcurl -plaintext \
 ```
 
 ### Per-provider revocation flow
+
+With a policy-evaluating PDP (AuthzForce CE). With the bundled stand-in, deleting one
+provider's policy leaves the pair permitted while any other policy for that
+(subject, resource) pair remains.
 
 ```bash
 # Revoke site-2 access only (orchestration plane)
@@ -123,7 +138,7 @@ curl -s -X DELETE http://localhost:9505/policies/$POL_ID
 grpcurl -plaintext \
   -d '{"subject":"portal-cloud-ml","service":"telemetry","provider":"robot-fleet-site-2","action":"orchestrate"}' \
   localhost:9550 arrowhead.authz.v1.AuthorizationPDP/Decide
-# → {"decision":"NOT_APPLICABLE",...}
+# → {"decision":"DENY",...}
 ```
 
 ## Regenerating Go code
